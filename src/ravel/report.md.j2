@@ -1,0 +1,157 @@
+# Отчёт о проверке требований: {{ p.document_title }}
+
+## 1. Паспорт прогона
+
+| Поле | Значение |
+| :--- | :--- |
+| Документ | {{ p.document_title | cell }} |
+| Файл | `{{ p.source_name }}` |
+| SHA-256 файла | `{{ p.source_sha256[:16] }}…` |
+| Дата прогона | {{ p.started_at.strftime("%Y-%m-%d %H:%M %Z") }} |
+| Провайдер / модель | {{ p.provider }} / {{ p.model }} |
+| Версия агента | {{ p.agent_version }} |
+| Версия промптов | {{ p.prompt_version }} |
+| Критерии | ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3 |
+
+{% if r.issues or r.llm_failures or r.dropped_unverified %}
+## Ограничения прогона
+
+{% for i in r.issues %}
+- **{{ "Ошибка" if i.level == "fatal" else "Предупреждение" }}** ({{ i.code }}): {{ i.message }}{% if i.location %} — {{ i.location }}{% endif %}
+
+{% endfor %}
+{% for m in r.llm_failures %}
+- **LLM**: {{ m }}
+{% endfor %}
+{% if r.dropped_unverified %}
+- Отброшено находок без подтверждённой цитаты: {{ r.dropped_unverified }} (цитата не найдена в тексте документа).
+{% endif %}
+
+{% endif %}
+{% if r.fatal %}
+## Итог
+
+{{ r.verdict.headline }}
+
+{% for x in r.verdict.fix_first %}
+- {{ x }}
+{% endfor %}
+{% else %}
+## 2. Как агент нарезал требования
+
+Всего выделено требований: **{{ r.requirements | length }}**. Если в документе не было номера, в колонке «В документе» стоит «—», а требование идентифицируется цитатой и местом.
+
+| В отчёте | В документе | Место | Формулировка |
+| :--- | :--- | :--- | :--- |
+{% for q in r.requirements %}
+| {{ q.id }} | {{ q.source_id or "—" }} | {{ q.location | cell(90) }} | {{ q.text | cell }} |
+{% endfor %}
+
+## 3. Проверка каждого требования
+
+{% for q in r.requirements %}
+### {{ q.id }}{% if q.source_id %} ({{ q.source_id }}){% endif %}
+
+> {{ q.text | cell(600) }}
+
+{% set fs = by_req.get(q.id, []) %}
+{% if fs %}
+{% for f in fs %}
+- **{{ f.id }} · {{ SL[f.severity] }} · {{ CL[f.criterion] }}** — {{ f.title }}
+  {{ f.explanation }}
+{% for qt in f.quotes %}
+  - Цитата: «{{ qt.text | cell(300) }}» ({{ qt.location }})
+{% endfor %}
+{% if f.suggestion %}
+  - Как исправить: {{ f.suggestion }}
+{% endif %}
+{% endfor %}
+{% else %}
+Нарушений не найдено.
+{% endif %}
+
+{% endfor %}
+## 4. Проверка всего набора требований
+
+{% if set_findings %}
+{% for f in set_findings %}
+### {{ f.id }} · {{ SL[f.severity] }} · {{ CL[f.criterion] }}
+
+**{{ f.title }}.** {{ f.explanation }}{% if f.requirement_ids %} Затронуты: {{ f.requirement_ids | join(", ") }}.{% endif %}
+
+{% for qt in f.quotes %}
+- Цитата: «{{ qt.text | cell(300) }}» ({{ qt.location }})
+{% endfor %}
+{% if f.suggestion %}
+- Как исправить: {{ f.suggestion }}
+{% endif %}
+
+{% endfor %}
+{% else %}
+Нарушений на уровне набора не найдено.
+
+{% endif %}
+## 5. Уточняющие вопросы к автору
+
+{% if r.questions %}
+Без ответов на эти вопросы разработка и тестирование будут опираться на догадки. Файл для ответов: `*.questions.yaml`; повторный прогон с `--answers` учитывает ответы.
+
+{% for q in r.questions %}
+**{{ q.id }} · {{ SL[q.priority] }}.** {{ q.question }}
+
+- Зачем: {{ q.why }}
+{% if q.options %}
+- Варианты: {{ q.options | join("; ") }}
+{% endif %}
+{% if q.requirement_ids or q.finding_ids %}
+- Связано: {{ (q.requirement_ids + q.finding_ids) | join(", ") }}
+{% endif %}
+{% for qt in q.quotes %}
+- Цитата: «{{ qt.text | cell(300) }}» ({{ qt.location }})
+{% endfor %}
+{% if q.answer %}
+- **Ответ автора:** {{ q.answer }}
+{% endif %}
+
+{% endfor %}
+{% else %}
+Вопросов нет.
+
+{% endif %}
+## 6. Сводка
+
+| Показатель | Значение |
+| :--- | ---: |
+| Требований выделено | {{ r.requirements | length }} |
+| Требований с нарушениями | {{ reqs_with_defects }} |
+| Нарушений всего | {{ r.findings | length }} |
+| Критичных | {{ sev["critical"] }} |
+| Существенных | {{ sev["major"] }} |
+| Незначительных | {{ sev["minor"] }} |
+| Уточняющих вопросов | {{ r.questions | length }} |
+
+{% if by_criterion %}
+**По критериям:** {% for c, n in by_criterion %}{{ CL[c] }} — {{ n }}{{ "; " if not loop.last else "." }}{% endfor %}
+
+
+{% endif %}
+{% if critical %}
+**Критичные дефекты:**
+
+{% for f in critical %}
+- {{ f.id }} ({{ f.requirement_ids | join(", ") or "набор" }}): {{ f.title }} — «{{ f.quotes[0].text | cell(120) }}»
+{% endfor %}
+
+{% endif %}
+## 7. Итог
+
+**{{ r.verdict.headline }}**
+
+{% if r.verdict.fix_first %}
+Исправить в первую очередь:
+
+{% for x in r.verdict.fix_first %}
+1. {{ x }}
+{% endfor %}
+{% endif %}
+{% endif %}
