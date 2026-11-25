@@ -1,0 +1,45 @@
+[project]
+name = "ravel-bcc"
+version = "0.1.0"
+description = "CLI-агент статической проверки требований (ISO/IEC/IEEE 29148, IEEE 830)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "jinja2>=3.1",
+    "pymupdf>=1.24",
+    "pymupdf4llm>=0.0.17",
+    "python-docx>=1.1",
+    "charset-normalizer>=3.3",
+    "google-genai>=1.0",
+    "ollama>=0.4",
+    "tenacity>=8.2",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+ravel = "ravel.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ravel"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # длинные русские сообщения; длину кода держит ruff format
