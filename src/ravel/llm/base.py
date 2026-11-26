@@ -1,43 +1,127 @@
-"""Общая логика клиентов: кэш, повторы при сбоях, починка ответа не по схеме."""
+"""Общая логика клиентов: кэш, ограниченные повторы, бюджет запросов, починка ответа не по схеме."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+from tenacity import RetryCallState, Retrying, retry_if_exception_type, wait_exponential_jitter
 
 from ravel.fsutil import atomic_write
 from ravel.prompts import PROMPT_VERSION
 
 T = TypeVar("T", bound=BaseModel)
+N = TypeVar("N", int, float)
 SEED = 17
+
+DEFAULT_MAX_CALLS = 50  # запросов к провайдеру за прогон, RAVEL_MAX_CALLS; 0 — без ограничения
+DEFAULT_MAX_OUTPUT_TOKENS = 16384  # RAVEL_MAX_OUTPUT_TOKENS; у Gemini сюда входят и токены «размышлений»
+MAX_ATTEMPTS = 3  # попыток на один запрос, считая первую: сбойный этап тратит не больше трёх вызовов
+MAX_RETRY_WAIT = 60.0  # секунд; если провайдер просит ждать дольше, повтор не имеет смысла
+ERROR_TEXT_LIMIT = 300  # символов текста ошибки провайдера в отчёте
+
+_HIDDEN = "[ключ скрыт]"
+_GOOGLE_KEY_RE = re.compile(r"AIza[0-9A-Za-z_\-]{10,}")
+_URL_KEY_RE = re.compile(r"([?&](?:key|api_key)=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def redact(text: str, secrets: Iterable[str] = ()) -> str:
+    """Вырезать ключи: значение GEMINI_API_KEY, переданные секреты, всё похожее на AIza…, key=… в URL."""
+    text = _URL_KEY_RE.sub(r"\1" + _HIDDEN, text)
+    for secret in (*secrets, os.getenv("GEMINI_API_KEY", "")):
+        if secret and len(secret) >= 8:
+            text = text.replace(secret, _HIDDEN)
+    return _GOOGLE_KEY_RE.sub(_HIDDEN, text)
+
+
+def provider_text(text: object, secrets: Iterable[str] = (), limit: int = ERROR_TEXT_LIMIT) -> str:
+    """Текст ошибки провайдера для исключения и отчёта: без ключей, в одну строку, не длиннее limit."""
+    clean = " ".join(redact(str(text), secrets).split())
+    return clean if len(clean) <= limit else clean[: limit - 1] + "…"
 
 
 class LLMError(Exception):
     """Ответ не получен или не разобран после всех попыток."""
 
+    def __init__(self, message: str = ""):
+        # страховка на любом пути: текст исключения попадает в отчёт, ключа в нём быть не должно
+        super().__init__(redact(str(message)))
+
 
 class LLMUnavailable(LLMError):
-    """Провайдер недоступен вообще (нет ключа, сервер не запущен)."""
+    """Провайдер недоступен вообще (нет ключа или сети, модель не найдена): дальше прогон идёт без LLM."""
+
+
+class QuotaExhausted(LLMUnavailable):
+    """Квота провайдера или бюджет запросов на прогон исчерпаны: новых запросов клиент не делает."""
+
+
+class TruncatedResponse(LLMError):
+    """Модель оборвала ответ (лимит токенов, фильтр безопасности, цитирование): результат неполный."""
 
 
 class TransientError(LLMError):
-    """Временный сбой (429, 5xx, таймаут): стоит повторить."""
+    """Временный сбой (429, 5xx, таймаут, обрыв связи): стоит повторить, но не больше attempts раз.
+
+    retry_after — сколько секунд просит подождать провайдер (Retry-After, RetryInfo.retryDelay).
+    final — во что превращается ошибка, когда попытки кончились: LLMUnavailable и QuotaExhausted
+    выключают LLM до конца прогона, LLMError проваливает только текущий этап.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: float | None = None,
+        attempts: int = MAX_ATTEMPTS,
+        final: type[LLMError] = LLMError,
+    ):
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.attempts = attempts
+        self.final = final
+
+
+def env_number(name: str, default: N, cast: Callable[[str], N], minimum: N) -> N:
+    """Число из переменной окружения; мусор или значение меньше minimum — понятная ошибка, а не трейсбек."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        value = None
+    if value is None or value < minimum:
+        raise LLMUnavailable(f"{name}={raw!r}: ожидается число не меньше {minimum}.")
+    return value
 
 
 class LLMClient(ABC):
     provider: str = "?"
+    max_attempts: int = MAX_ATTEMPTS
+    max_retry_wait: float = MAX_RETRY_WAIT
+    # пауза между повторами; в тестах подменяется, чтобы не ждать
+    retry_sleep: Callable[[float], None] = staticmethod(time.sleep)
 
-    def __init__(self, model: str, cache_dir: Path | None):
+    def __init__(self, model: str, cache_dir: Path | None, max_calls: int | None = None):
         self.model = model
         self.cache_dir = cache_dir
+        self.max_calls = (
+            env_number("RAVEL_MAX_CALLS", DEFAULT_MAX_CALLS, int, 0) if max_calls is None else max_calls
+        )
         self.calls = 0
         self.cache_hits = 0
+        self.exhausted: QuotaExhausted | None = None
+        self._secrets: tuple[str, ...] = ()
+        self._backoff = wait_exponential_jitter(initial=1, max=MAX_RETRY_WAIT)
 
     @property
     def label(self) -> str:
@@ -45,7 +129,10 @@ class LLMClient(ABC):
 
     @abstractmethod
     def _raw(self, system: str, user: str, schema: type[BaseModel]) -> str:
-        """Один запрос к модели, вернуть JSON-строку."""
+        """Один запрос к модели, вернуть JSON-строку. Сбои — только подклассы LLMError."""
+
+    def _text(self, text: object) -> str:
+        return provider_text(text, self._secrets)
 
     def complete(self, system: str, user: str, schema: type[T]) -> T:
         key = self._key(system, user, schema)
@@ -76,15 +163,58 @@ class LLMClient(ABC):
         self._cache_put(key, raw)
         return result
 
-    @retry(
-        retry=retry_if_exception_type(TransientError),
-        wait=wait_exponential_jitter(initial=2, max=60),
-        stop=stop_after_attempt(6),
-        reraise=True,
-    )
+    # ---------------------------------------------------------------- retries
+
     def _call(self, system: str, user: str, schema: type[BaseModel]) -> str:
+        tries = 0
+
+        def attempt() -> str:
+            nonlocal tries
+            tries += 1
+            return self._request(system, user, schema)
+
+        retrying = Retrying(
+            retry=retry_if_exception_type(TransientError),
+            stop=self._should_stop,
+            wait=self._retry_wait,
+            sleep=self.retry_sleep,
+            reraise=True,
+        )
+        try:
+            return retrying(attempt)
+        except TransientError as e:
+            final = e.final(f"{e} (попыток: {tries})")
+            if isinstance(final, QuotaExhausted):
+                self.exhausted = final
+            raise final from e
+        except QuotaExhausted as e:
+            self.exhausted = self.exhausted or e
+            raise
+
+    def _request(self, system: str, user: str, schema: type[BaseModel]) -> str:
+        if self.exhausted is not None:
+            raise QuotaExhausted(str(self.exhausted))
+        if self.max_calls and self.calls >= self.max_calls:
+            raise QuotaExhausted(
+                f"Исчерпан бюджет запросов к LLM на прогон: {self.max_calls} (RAVEL_MAX_CALLS). "
+                "Остальные проверки выполнены только по правилам."
+            )
         self.calls += 1
         return self._raw(system, user, schema)
+
+    def _should_stop(self, state: RetryCallState) -> bool:
+        exc = state.outcome.exception() if state.outcome else None
+        if not isinstance(exc, TransientError):
+            return True
+        if exc.retry_after is not None and exc.retry_after > self.max_retry_wait:
+            return True  # провайдер просит ждать дольше, чем стоит держать прогон
+        return state.attempt_number >= min(self.max_attempts, exc.attempts)
+
+    def _retry_wait(self, state: RetryCallState) -> float:
+        """Экспоненциальная пауза с джиттером, но не меньше, чем просит провайдер."""
+        exc = state.outcome.exception() if state.outcome else None
+        hint = exc.retry_after if isinstance(exc, TransientError) and exc.retry_after else 0.0
+        return min(max(self._backoff(state), hint), self.max_retry_wait)
 
     # ------------------------------------------------------------------ cache
 
