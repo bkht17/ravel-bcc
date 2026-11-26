@@ -52,6 +52,8 @@ def check(
         raise typer.Exit(3) from e
 
     prior = load_answers(answers) if answers else []
+    if llm is not None:
+        llm.on_event = lambda msg: typer.secho(f"      {msg}", fg=typer.colors.BRIGHT_BLACK, err=True)
     step = lambda name: typer.secho(f"  → {name}", fg=typer.colors.BRIGHT_BLACK, err=True)  # noqa: E731
 
     typer.secho(f"ravel {__version__}: {input} [{llm.label if llm else 'без LLM'}]", err=True)
