@@ -10,13 +10,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from ravel.llm import LLMClient
-from ravel.models import DocumentIR, Finding, Question, Requirement
+from ravel.models import DocumentIR, Fact, Finding, Question, Requirement
 
 
 @dataclass
 class RunContext:
     doc: DocumentIR
     requirements: list[Requirement] = field(default_factory=list)
+    facts: list[Fact] = field(default_factory=list)  # таблица фактов SetChecker
     findings: list[Finding] = field(default_factory=list)
     questions: list[Question] = field(default_factory=list)
     answers: list[Question] = field(default_factory=list)  # вопросы прошлого прогона с ответами

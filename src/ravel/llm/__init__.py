@@ -5,7 +5,19 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ravel.llm.base import LLMClient, LLMError, LLMUnavailable
+from ravel.llm.base import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    LLMClient,
+    LLMError,
+    LLMUnavailable,
+    QuotaExhausted,
+    TransientError,
+    TruncatedResponse,
+    env_number,
+)
+
+# Стабильная Flash, бесплатная на Standard-тарифе; gemini-2.5-flash с 01.12.2026 Google перенаправляет
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 
 
 def get_client(provider: str, model: str | None = None, cache_dir: Path | None = None) -> LLMClient | None:
@@ -14,22 +26,40 @@ def get_client(provider: str, model: str | None = None, cache_dir: Path | None =
     cache = cache_dir or Path(os.getenv("RAVEL_CACHE_DIR", ".cache/llm"))
     if provider == "none":
         return None
+    max_tokens = env_number("RAVEL_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS, int, 256)
     if provider == "gemini":
-        from ravel.llm.gemini import GeminiClient
+        from ravel.llm.gemini import DEFAULT_TIMEOUT, GeminiClient
 
         key = os.getenv("GEMINI_API_KEY", "")
         if not key or key == "your_gemini_api_key_here":
             raise LLMUnavailable("Не задан GEMINI_API_KEY. Скопируйте .env.example в .env и впишите ключ.")
-        return GeminiClient(model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), key, cache)
+        return GeminiClient(
+            model or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
+            key,
+            cache,
+            timeout=env_number("RAVEL_LLM_TIMEOUT", DEFAULT_TIMEOUT, float, 1.0),
+            max_output_tokens=max_tokens,
+        )
     if provider == "ollama":
-        from ravel.llm.ollama import OllamaClient
+        from ravel.llm.ollama import DEFAULT_TIMEOUT, OllamaClient
 
         return OllamaClient(
             model or os.getenv("OLLAMA_MODEL", "qwen2.5:14b"),
             os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             cache,
+            timeout=env_number("RAVEL_LLM_TIMEOUT", DEFAULT_TIMEOUT, float, 1.0),
+            max_output_tokens=max_tokens,
         )
     raise LLMUnavailable(f"Неизвестный провайдер: {provider}. Допустимо: gemini, ollama, none.")
 
 
-__all__ = ["LLMClient", "LLMError", "LLMUnavailable", "get_client"]
+__all__ = [
+    "DEFAULT_GEMINI_MODEL",
+    "LLMClient",
+    "LLMError",
+    "LLMUnavailable",
+    "QuotaExhausted",
+    "TransientError",
+    "TruncatedResponse",
+    "get_client",
+]

@@ -1,0 +1,9 @@
+# Эталон eval/foreign/timer.md — контрольный документ: 5 корректных требований, дефектов нет.
+# Ожидаем 0 находок; любая находка — кандидат в ложное срабатывание (оценить в eval/judgments.yaml).
+
+document: eval/foreign/timer.md
+source: контроль ложных срабатываний
+tolerance: 0
+clean_lines: [3, 5, 7, 9, 11]
+
+entries: []

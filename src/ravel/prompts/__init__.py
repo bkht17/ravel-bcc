@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import cache
 from importlib.resources import files
 
-PROMPT_VERSION = "2026-11-25.1"
+PROMPT_VERSION = "2026-11-26.1"
 
 
 @cache

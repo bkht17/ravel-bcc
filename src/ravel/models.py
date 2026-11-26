@@ -83,6 +83,9 @@ class Requirement(BaseModel):
     text: str  # дословная цитата
     section: list[str] = Field(default_factory=list)
     location: str
+    # True, только если LLM-проверка этого требования реально прошла. False — «не проверено»,
+    # а не «нарушений нет»: отчёт и итог обязаны их различать.
+    checked: bool = False
 
     @property
     def short(self) -> str:
@@ -110,7 +113,7 @@ class Criterion(StrEnum):
     set_comprehensible = "set_comprehensible"
     set_validatable = "set_validatable"
     # IEEE 830-1998, 4.3
-    ranked = "ranked"
+    ranked = "ranked"  # 4.3.5: важность И стабильность — разбираются отдельными находками
     modifiable = "modifiable"
     traceable = "traceable"
     # Прочее, что важно банку
@@ -138,6 +141,37 @@ CRITERION_LABELS: dict[Criterion, str] = {
     Criterion.security: "Риск ИБ",
 }
 
+# Какие критерии допустимы на каком уровне. LLM-схемы строятся из этих множеств, поэтому
+# модель физически не может вернуть находку набора с критерием отдельного требования.
+REQUIREMENT_CRITERIA: frozenset[Criterion] = frozenset(
+    {
+        Criterion.necessary,
+        Criterion.appropriate,
+        Criterion.unambiguous,
+        Criterion.complete,
+        Criterion.singular,
+        Criterion.feasible,
+        Criterion.verifiable,
+        Criterion.correct,
+        Criterion.conforming,
+        Criterion.traceable,
+        Criterion.security,
+    }
+)
+SET_CRITERIA: frozenset[Criterion] = frozenset(
+    {
+        Criterion.set_complete,
+        Criterion.set_consistent,
+        Criterion.set_feasible,
+        Criterion.set_comprehensible,
+        Criterion.set_validatable,
+        Criterion.ranked,
+        Criterion.modifiable,
+        Criterion.traceable,
+        Criterion.security,
+    }
+)
+
 
 class Severity(StrEnum):
     critical = "critical"  # непроверяемо / противоречиво / неполно так, что нельзя разрабатывать
@@ -157,6 +191,16 @@ class Quote(BaseModel):
     text: str
     block_id: str | None = None  # заполняет verifier
     location: str | None = None  # заполняет verifier
+
+
+class Fact(BaseModel):
+    """Утверждение документа по одной теме (порог, даты, статусы…) — сырьё для SetChecker."""
+
+    id: str = ""  # T-001
+    topic: str
+    statement: str
+    quote: Quote
+    requirement_ids: list[str] = Field(default_factory=list)
 
 
 class Finding(BaseModel):

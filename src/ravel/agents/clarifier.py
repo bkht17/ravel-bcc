@@ -58,7 +58,9 @@ class ClarifierAgent(Agent):
             f"{f.title}. {f.explanation}\nЦитаты: " + " | ".join(f"«{q.text}»" for q in f.quotes)
             for f in important
         )
-        user = f"Документ: «{ctx.doc.title}».\n\nНайденные дефекты:\n\n{listing}"
+        answers = ctx.answers_block()
+        user = f"Документ: «{ctx.doc.title}».\n\n" + (answers + "\n\n" if answers else "")
+        user += f"Найденные дефекты:\n\n{listing}"
         try:
             out = self.llm.complete(system, user, LLMQuestions)
         except LLMUnavailable:
@@ -68,12 +70,18 @@ class ClarifierAgent(Agent):
             return None
         valid_f = {f.id for f in ctx.findings}
         valid_r = {r.id for r in ctx.requirements}
+        block_of = {r.id: r.block_id for r in ctx.requirements}
         result = []
         for q in out.questions:
+            prefer = [block_of[x] for x in q.requirement_ids if x in block_of]
             quotes = []
             for text in q.quotes:
-                if block := locate(text, ctx.doc):
+                if block := locate(text, ctx.doc, prefer=prefer):
                     quotes.append(Quote(text=text, block_id=block.id, location=block.location))
+            # вопрос без подтверждённой цитаты или с выдуманной цитатой не задаём: автор должен
+            # видеть, к какому месту документа он относится
+            if not quotes or len(quotes) < len([t for t in q.quotes if t.strip()]):
+                continue
             result.append(
                 Question(
                     question=q.question.strip(),
@@ -85,6 +93,12 @@ class ClarifierAgent(Agent):
                     priority=q.priority,
                 )
             )
+        if not result:
+            if out.questions:
+                ctx.llm_failures.append(
+                    f"{self.name}: ни один вопрос модели не подтверждён цитатой, вопросы составлены по шаблону"
+                )
+            return None
         return result
 
     @staticmethod
