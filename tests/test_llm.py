@@ -278,6 +278,31 @@ def test_503_then_success_recovers():
     assert len(script.calls) == 2
 
 
+def test_progress_events_show_requests_retries_and_cache(tmp_path):
+    """Долгое ожидание ответа не должно выглядеть как зависание: каждый шаг виден в CLI."""
+    client, _, _ = make_gemini(api_error(503, "UNAVAILABLE", "overloaded"), gemini_response(), timeout=30)
+    client.cache_dir = tmp_path
+    events: list[str] = []
+    client.on_event = events.append
+    assert client.complete("s", "u", Verdict, "R-001–R-006") == Verdict(ok=True)
+    assert all(e.startswith("R-001–R-006: ") for e in events)
+    assert "запрос 1/50 к gemini-test, ждём до 30 с" in events[0]
+    assert "повтор 2/3 через" in events[1]
+    assert "запрос 2/50" in events[2] and "ответ за" in events[3]
+    events.clear()
+    client.complete("s", "u", Verdict, "R-001–R-006")
+    assert events == ["R-001–R-006: из кэша"]
+
+
+def test_progress_reports_giving_up():
+    client, _, _ = make_gemini(api_error(503, "UNAVAILABLE", "overloaded"))
+    events: list[str] = []
+    client.on_event = events.append
+    with pytest.raises(LLMUnavailable):
+        ask(client)
+    assert events[-1] == "Verdict: не удалось после 3 попыток"
+
+
 @pytest.mark.parametrize("module", [httpx, httpx2], ids=["httpx", "httpx2"])
 @pytest.mark.parametrize("name", ["ConnectError", "RemoteProtocolError", "ReadError"])
 def test_network_errors_become_unavailable_after_retries(module, name):

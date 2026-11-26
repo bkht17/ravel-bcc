@@ -62,7 +62,7 @@ class ClarifierAgent(Agent):
         user = f"Документ: «{ctx.doc.title}».\n\n" + (answers + "\n\n" if answers else "")
         user += f"Найденные дефекты:\n\n{listing}"
         try:
-            out = self.llm.complete(system, user, LLMQuestions)
+            out = self.llm.complete(system, user, LLMQuestions, "вопросы")
         except LLMUnavailable:
             raise
         except LLMError as e:

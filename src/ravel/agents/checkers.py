@@ -92,7 +92,7 @@ class CheckerAgent(Agent):
                 + "\n>>>"
             )
             try:
-                out = self.llm.complete(system, user, LLMFindings)
+                out = self.llm.complete(system, user, LLMFindings, f"{batch[0].id}–{batch[-1].id}")
             except LLMUnavailable:
                 raise
             except LLMError as e:
@@ -147,7 +147,7 @@ class SetCheckerAgent(Agent):
             + f"Требования (для поля requirement_ids):\n{reqs}"
         )
         try:
-            out = self.llm.complete(system, user, LLMSetFindings)
+            out = self.llm.complete(system, user, LLMSetFindings, "сравнение фактов")
         except LLMUnavailable:
             raise
         except LLMError as e:

@@ -110,6 +110,8 @@ class LLMClient(ABC):
     max_retry_wait: float = MAX_RETRY_WAIT
     # пауза между повторами; в тестах подменяется, чтобы не ждать
     retry_sleep: Callable[[float], None] = staticmethod(time.sleep)
+    # строки прогресса (CLI печатает их в stderr): без них долгий запрос неотличим от зависания
+    on_event: Callable[[str], None] | None = None
 
     def __init__(self, model: str, cache_dir: Path | None, max_calls: int | None = None):
         self.model = model
@@ -122,6 +124,7 @@ class LLMClient(ABC):
         self.exhausted: QuotaExhausted | None = None
         self._secrets: tuple[str, ...] = ()
         self._backoff = wait_exponential_jitter(initial=1, max=MAX_RETRY_WAIT)
+        self._label = ""
 
     @property
     def label(self) -> str:
@@ -134,21 +137,31 @@ class LLMClient(ABC):
     def _text(self, text: object) -> str:
         return provider_text(text, self._secrets)
 
-    def complete(self, system: str, user: str, schema: type[T]) -> T:
+    def _emit(self, message: str) -> None:
+        if self.on_event:
+            self.on_event(message)
+
+    def complete(self, system: str, user: str, schema: type[T], label: str = "") -> T:
+        """label — что проверяется этим запросом (например, «R-001–R-006»), только для прогресса."""
+        what = label or schema.__name__
         key = self._key(system, user, schema)
         cached = self._cache_get(key)
         if cached is not None:
             try:
+                result = schema.model_validate_json(cached)
                 self.cache_hits += 1
-                return schema.model_validate_json(cached)
+                self._emit(f"{what}: из кэша")
+                return result
             except ValidationError:
                 pass  # схема поменялась — перезапросим
 
+        self._label = what
         raw = self._call(system, user, schema)
         try:
             result = schema.model_validate_json(raw)
         except ValidationError as e:
             # одна попытка починки: показываем модели её ошибку
+            self._emit(f"{what}: ответ не по схеме, прошу исправить")
             fix = (
                 f"{user}\n\nТвой предыдущий ответ не прошёл проверку схемы:\n{str(e)[:1500]}\n"
                 "Верни исправленный JSON строго по схеме."
@@ -178,11 +191,13 @@ class LLMClient(ABC):
             stop=self._should_stop,
             wait=self._retry_wait,
             sleep=self.retry_sleep,
+            before_sleep=self._before_sleep,
             reraise=True,
         )
         try:
             return retrying(attempt)
         except TransientError as e:
+            self._emit(f"{self._label}: не удалось после {tries} попыток")
             final = e.final(f"{e} (попыток: {tries})")
             if isinstance(final, QuotaExhausted):
                 self.exhausted = final
@@ -200,7 +215,21 @@ class LLMClient(ABC):
                 "Остальные проверки выполнены только по правилам."
             )
         self.calls += 1
-        return self._raw(system, user, schema)
+        budget = f"/{self.max_calls}" if self.max_calls else ""
+        timeout = getattr(self, "timeout", None)
+        limit = f", ждём до {timeout:g} с" if timeout else ""
+        self._emit(f"{self._label}: запрос {self.calls}{budget} к {self.model}{limit}…")
+        started = time.monotonic()
+        raw = self._raw(system, user, schema)
+        self._emit(f"{self._label}: ответ за {time.monotonic() - started:.0f} с")
+        return raw
+
+    def _before_sleep(self, state: RetryCallState) -> None:
+        exc = state.outcome.exception() if state.outcome else None
+        wait = state.next_action.sleep if state.next_action else 0.0
+        total = min(self.max_attempts, exc.attempts) if isinstance(exc, TransientError) else self.max_attempts
+        reason = str(exc).splitlines()[0][:100] if exc else "сбой"
+        self._emit(f"{self._label}: {reason} — повтор {state.attempt_number + 1}/{total} через {wait:.0f} с")
 
     def _should_stop(self, state: RetryCallState) -> bool:
         exc = state.outcome.exception() if state.outcome else None
