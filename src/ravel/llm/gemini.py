@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -100,8 +101,9 @@ class GeminiClient(LLMClient):
         timeout: float = DEFAULT_TIMEOUT,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         max_calls: int | None = None,
+        fallback_models: Iterable[str] = (),
     ):
-        super().__init__(model, cache_dir, max_calls)
+        super().__init__(model, cache_dir, max_calls, fallback_models)
         self.timeout = timeout
         self.max_output_tokens = max_output_tokens
         self._secrets = (api_key,)
@@ -131,6 +133,7 @@ class GeminiClient(LLMClient):
                 "лимит задаётся RAVEL_LLM_TIMEOUT",
                 attempts=2,
                 final=LLMUnavailable,
+                model_issue=f"не ответила за {self.timeout:g} с",
             ) from e
         except _TRANSPORT as e:
             raise TransientError(
@@ -179,8 +182,12 @@ class GeminiClient(LLMClient):
         if code == 400 and status == "FAILED_PRECONDITION":
             return LLMUnavailable(f"{where}: Gemini API недоступен для этого ключа или региона. {msg}")
         if code in _RETRYABLE or code >= 500:
+            # 503 «high demand» и прочие 5xx — перегрузка конкретной модели, у запасной её может не быть
             return TransientError(
-                f"{where}: {msg}", retry_after=_retry_after(e, details), final=LLMUnavailable
+                f"{where}: {msg}",
+                retry_after=_retry_after(e, details),
+                final=LLMUnavailable,
+                model_issue=f"перегружена ({code})",
             )
         return LLMError(f"{where}: {msg}")
 
@@ -191,15 +198,23 @@ class GeminiClient(LLMClient):
         quota_ids = [str(v.get("quotaId", "")) for v in violations if v.get("quotaId")]
         per_day = any("PerDay" in q for q in quota_ids)
         no_quota = any(str(v.get("quotaValue", "")) == "0" for v in violations)  # модели нет на этом тарифе
+        # бесплатные квоты Gemini считаются отдельно на каждую модель (…PerProjectPerModel-FreeTier):
+        # исчерпанная квота одной модели не мешает запасной
+        per_model = any("PerModel" in q for q in quota_ids)
         ids = ", ".join(quota_ids) or "квота"
-        if per_day:
-            return QuotaExhausted(f"{where}: дневная квота Gemini исчерпана ({ids}). {msg}")
         if no_quota:
             return QuotaExhausted(
-                f"{where}: на тарифе этого ключа у {self.model} нулевая квота ({ids}). {msg}"
+                f"{where}: на тарифе этого ключа у {self.model} нулевая квота ({ids}). {msg}",
+                model_issue="нет квоты на этом тарифе",
+            )
+        if per_day:
+            return QuotaExhausted(
+                f"{where}: дневная квота Gemini исчерпана ({ids}). {msg}",
+                model_issue="дневная квота исчерпана" if per_model else "",
             )
         return TransientError(
             f"{where}: превышен лимит запросов Gemini. {msg}",
             retry_after=_retry_after(e, details),
             final=QuotaExhausted,
+            model_issue="лимит запросов в минуту" if per_model else "",
         )

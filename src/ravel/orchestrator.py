@@ -61,6 +61,7 @@ def run(
         return report
 
     ctx = RunContext(doc=doc, answers=answers or [])
+    client = llm  # llm обнуляется при сбое провайдера, а паспорту нужна итоговая модель
     pipeline: list[Agent] = [
         SegmenterAgent(),
         LintAgent(),
@@ -108,6 +109,8 @@ def run(
             )
         )
 
+    if client is not None:
+        passport.model = client.models_label  # если основная модель была перегружена — видно в паспорте
     report.requirements = ctx.requirements
     report.findings = ctx.findings
     report.questions = ctx.questions

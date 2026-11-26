@@ -9,7 +9,7 @@ import pytest
 from ravel import orchestrator
 from ravel.agents.facts import chunks
 from ravel.ingest import load_document
-from ravel.llm.base import LLMClient, LLMUnavailable
+from ravel.llm.base import LLMClient, LLMUnavailable, TransientError
 from ravel.models import Question
 from ravel.quotes import locate
 
@@ -236,6 +236,24 @@ def test_provider_down_falls_back_to_rules(sample):
     assert report.llm_failures
     assert not any(r.checked for r in report.requirements)
     assert orchestrator.exit_code(report) == 2
+
+
+def test_overloaded_primary_model_hands_over_to_fallback(sample):
+    """Основная модель отвечает 503: прогон доходит до конца на запасной, паспорт это показывает."""
+
+    class Busy(FakeLLM):
+        def _raw(self, system, user, schema):
+            if self.model == "fake-1":
+                raise TransientError("503 high demand", final=LLMUnavailable, model_issue="перегружена (503)")
+            return super()._raw(system, user, schema)
+
+    llm = Busy({"LLMFacts": [GOOD_FACTS]})
+    llm.fallback_models = ["fake-lite"]
+    llm.retry_sleep = lambda s: None
+    report = orchestrator.run(sample, llm)
+    assert not report.llm_failures
+    assert all(r.checked for r in report.requirements)
+    assert report.passport.model.startswith("fake-1 → fake-lite")
 
 
 def test_answers_reach_llm_prompts(sample):

@@ -278,6 +278,92 @@ def test_503_then_success_recovers():
     assert len(script.calls) == 2
 
 
+def test_overloaded_model_falls_back_and_stays_on_fallback(tmp_path):
+    """503 «high demand» у основной модели: тот же запрос уходит запасной, она и отвечает дальше."""
+    overloaded = api_error(503, "UNAVAILABLE", "This model is currently experiencing high demand.")
+    client, script, _ = make_gemini(
+        overloaded, overloaded, overloaded, gemini_response(), fallback_models=["gemini-lite"]
+    )
+    client.cache_dir = tmp_path
+    assert ask(client) == Verdict(ok=True)
+    assert [c["model"] for c in script.calls] == ["gemini-test"] * 3 + ["gemini-lite"]
+    assert client.model == "gemini-lite"
+    assert client.models_label == "gemini-test → gemini-lite (gemini-test: перегружена (503))"
+    ask(client, user="next")
+    assert script.calls[-1]["model"] == "gemini-lite"  # основную больше не дёргаем
+
+
+def test_fallback_answer_is_not_cached_as_primary(tmp_path):
+    overloaded = api_error(503, "UNAVAILABLE", "high demand")
+    client, _, _ = make_gemini(
+        overloaded, overloaded, overloaded, gemini_response(), fallback_models=["lite"]
+    )
+    client.cache_dir = tmp_path
+    ask(client)
+    primary, _, _ = make_gemini(gemini_response('{"ok": false}'))
+    primary.cache_dir = tmp_path
+    assert ask(primary) == Verdict(ok=False) and primary.cache_hits == 0
+
+
+def test_all_models_overloaded_is_unavailable():
+    overloaded = api_error(503, "UNAVAILABLE", "high demand")
+    client, script, _ = make_gemini(overloaded, fallback_models=["lite"])
+    with pytest.raises(LLMUnavailable, match="503"):
+        ask(client)
+    assert len(script.calls) == 6  # по 3 попытки на каждую модель
+
+
+def test_per_model_daily_quota_falls_back_without_blocking_client():
+    """Бесплатная квота считается на модель: кончилась у основной — отвечает запасная."""
+    client, script, sleeps = make_gemini(
+        quota_429("GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
+        gemini_response(),
+        fallback_models=["lite"],
+    )
+    assert ask(client) == Verdict(ok=True)
+    assert [c["model"] for c in script.calls] == ["gemini-test", "lite"] and sleeps == []
+    assert client.exhausted is None
+    assert "дневная квота исчерпана" in client.models_label
+
+
+def test_project_wide_daily_quota_does_not_fall_back():
+    client, script, _ = make_gemini(quota_429("GenerateRequestsPerDayPerProject"), fallback_models=["lite"])
+    with pytest.raises(QuotaExhausted):
+        ask(client)
+    assert {c["model"] for c in script.calls} == {"gemini-test"}
+
+
+def test_call_budget_does_not_fall_back():
+    client, script, _ = make_gemini(gemini_response(), max_calls=1, fallback_models=["lite"])
+    ask(client)
+    with pytest.raises(QuotaExhausted, match="RAVEL_MAX_CALLS"):
+        ask(client, user="другой запрос")
+    assert client.model == "gemini-test"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx2.ConnectError("refused"), api_error(400, "INVALID_ARGUMENT", "bad")],
+    ids=["no-network", "bad-request"],
+)
+def test_fallback_only_on_overload(error):
+    """Нет сети или плохой запрос — другая модель не поможет, переход не делается."""
+    client, script, _ = make_gemini(error, fallback_models=["lite"])
+    with pytest.raises(LLMError):
+        ask(client)
+    assert {c["model"] for c in script.calls} == {"gemini-test"}
+
+
+def test_fallback_models_from_env(monkeypatch):
+    from ravel.llm import get_client
+
+    monkeypatch.setenv("GEMINI_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash, gemini-a ,gemini-a")
+    assert get_client("gemini", "gemini-3.6-flash").fallback_models == ["gemini-a"]
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "")
+    assert get_client("gemini", "gemini-3.6-flash").fallback_models == []
+
+
 def test_progress_events_show_requests_retries_and_cache(tmp_path):
     """Долгое ожидание ответа не должно выглядеть как зависание: каждый шаг виден в CLI."""
     client, _, _ = make_gemini(api_error(503, "UNAVAILABLE", "overloaded"), gemini_response(), timeout=30)
