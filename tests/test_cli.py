@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -302,3 +303,46 @@ def test_full_clean_run_exit_0(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     assert READY_PHRASE in md
     assert "Покрытие: проверено 3 из 3 требований." in md
+
+
+def test_clarifier_failure_with_complete_check_exit_0(sample, tmp_path, monkeypatch):
+    from ravel.llm.base import LLMUnavailable
+
+    from .test_agents import GOOD_FACTS, FakeLLM
+
+    class ClarifierDown(FakeLLM):
+        def _raw(self, system, user, schema):
+            if schema.__name__ == "LLMQuestions":
+                raise LLMUnavailable("503")
+            return super()._raw(system, user, schema)
+
+    _use_llm(monkeypatch, ClarifierDown({"LLMFacts": [GOOD_FACTS]}))
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(sample), "-o", str(out), "-p", "gemini"])
+    report = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert any(m.startswith("clarifier") for m in report["llm_failures"])
+    assert report["verdict"]["status"] != "undecided"
+    assert res.exit_code == 0, res.output
+
+
+def test_set_checker_failure_is_undecided_exit_2(tmp_path, monkeypatch):
+    from ravel.llm.base import LLMUnavailable
+
+    from .conftest import MINI_MD
+    from .test_agents import FakeLLM
+
+    class SetCheckerDown(FakeLLM):
+        def _raw(self, system, user, schema):
+            if schema.__name__ == "LLMFacts":
+                raise LLMUnavailable("503")
+            return super()._raw(system, user, schema)
+
+    src = tmp_path / "mini.md"
+    src.write_text(MINI_MD, encoding="utf-8")
+    _use_llm(monkeypatch, SetCheckerDown({}))
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(src), "-o", str(out), "-p", "gemini"])
+    report = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert any(m.startswith("set_checker") for m in report["llm_failures"]), report["llm_failures"]
+    assert report["verdict"]["status"] == "undecided"
+    assert res.exit_code == 2, res.output

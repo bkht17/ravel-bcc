@@ -202,14 +202,16 @@ def verdict(report: Report) -> Verdict:
 
 
 def exit_code(report: Report) -> int:
-    """0 — проверено полностью; 2 — частично или итог не определён; 1 — документ не прочитан.
+    """0 — проверено полностью; 2 — итог не определён или документ прочитан частично; 1 — не прочитан.
 
-    3 (LLM недоступен до начала) выставляет CLI до запуска оркестратора.
+    Код 2 даёт только status="undecided": в undecided_reasons уже входят критичные сбои LLM и
+    warning-issues частичного чтения. Некритичный сбой (clarifier) и безобидные issues
+    (BENIGN_ISSUE_CODES) код не меняют. 3 (LLM недоступен до начала) выставляет CLI до запуска.
     """
     if report.fatal:
         return 1
     v = report.verdict or verdict(report)
-    if v.status == "undecided" or report.issues or report.llm_failures:
+    if v.status == "undecided":
         return 2
     return 0
 

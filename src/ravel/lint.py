@@ -98,7 +98,13 @@ def empty_sections(doc: DocumentIR) -> list[Finding]:
                     Criterion.set_complete,
                     Severity.minor,
                     f"Пустой раздел «{b.text}»",
-                    "Под заголовком нет содержания.",
+                    f"Заголовок «{b.text}»"
+                    + (f" (строка {b.line})" if b.line else "")
+                    + (
+                        " последний в документе."
+                        if nxt is None
+                        else f" сразу сменяется заголовком «{nxt.text}»."
+                    ),
                     [b.text],
                     "Заполнить раздел или удалить заголовок.",
                 )
@@ -158,7 +164,8 @@ def empty_tables(doc: DocumentIR) -> list[Finding]:
                     Criterion.set_complete,
                     Severity.minor,
                     f"Таблица «{b.section[-1] if b.section else '—'}» пустая",
-                    "В таблице нет ни одной заполненной строки.",
+                    f"Все строки таблицы в разделе «{b.section[-1] if b.section else '—'}» пусты"
+                    + (f" (первая — строка {b.line})." if b.line else "."),
                     [b.section[-1] if b.section else ""],
                     "Заполнить таблицу (например, согласующих) или удалить её.",
                 )
@@ -204,7 +211,9 @@ def vague_words(doc: DocumentIR) -> list[Finding]:
                         Criterion.unambiguous,
                         Severity.major,
                         f"Размытая формулировка «{w}»",
-                        "Слово допускает разное толкование и не даёт измеримого критерия приёмки.",
+                        "В тексте"
+                        + (f" (строка {b.line})" if b.line else "")
+                        + f" стоит слово «{w}» без числового значения, порога или условия.",
                         [_sentence(b.text, w)],
                         "Заменить на измеримое значение (время, количество, условие).",
                         scope="requirement",
@@ -283,8 +292,10 @@ def http_get_for_write(doc: DocumentIR) -> list[Finding]:
                 Criterion.correct,
                 Severity.critical,
                 "Изменение данных через GET",
-                "Метод меняет состояние (сохраняет настройку), но объявлен как GET. GET должен быть безопасным и "
-                "идемпотентным: прокси и браузеры кэшируют и повторяют его, параметры попадают в логи.",
+                f"Метод объявлен как {method.cells[1].strip()}"
+                + (f" (строка {method.line})" if method.line else "")
+                + f", но в его описании сказано про изменение данных: «{writes[0].text[:120]}»"
+                + (f" (строка {writes[0].line})." if writes[0].line else "."),
                 [method.text, writes[0].text[:200]],
                 "Использовать POST или PUT с телом запроса.",
             )
@@ -322,7 +333,9 @@ def status_codes(doc: DocumentIR) -> list[Finding]:
                         Criterion.correct,
                         Severity.major,
                         "Код 200 назван «Created»",
-                        "«Created» — это 201. Непонятно, какой код вернёт сервис при успешном сохранении.",
+                        f"Заголовок «{b.text}»"
+                        + (f" (строка {b.line})" if b.line else "")
+                        + " называет код 200 словом «Created», которым в HTTP назван код 201.",
                         [b.text],
                         "Выбрать один код (200 OK или 201 Created) и использовать его везде.",
                     )
@@ -336,7 +349,9 @@ def status_codes(doc: DocumentIR) -> list[Finding]:
                         Criterion.set_consistent,
                         Severity.major,
                         f"Код {code} не объявлен в списке статусов",
-                        f"Код {code} встречается в описании ответов, но отсутствует в перечне статусов метода.",
+                        f"Код {code} указан в тексте"
+                        + (f" (строка {b.line})" if b.line else "")
+                        + f", но среди объявленных кодов ({', '.join(sorted(declared))}) его нет.",
                         [b.text],
                         f"Добавить {code} в перечень статусов или убрать его из примеров.",
                     )
@@ -362,7 +377,10 @@ def content_type_without_body(doc: DocumentIR) -> list[Finding]:
                     Criterion.set_consistent,
                     Severity.minor,
                     "Content-Type указан для запроса без тела",
-                    "Заголовок Content-Type: application/json задан, но тело запроса не используется.",
+                    f"Заголовок «{ct.text}»"
+                    + (f" (строка {ct.line})" if ct.line else "")
+                    + f" задан, но в том же разделе указано: «{nobody.text}»"
+                    + (f" (строка {nobody.line})." if nobody.line else "."),
                     [ct.text, nobody.text],
                     "Убрать Content-Type или описать тело запроса.",
                 )
@@ -391,7 +409,10 @@ def param_type_mismatch(doc: DocumentIR) -> list[Finding]:
                     Criterion.set_consistent,
                     Severity.major,
                     f"Параметр {name}: тип {prev_fmt} в одном месте и {fmt} в другом",
-                    "Один и тот же параметр описан с разными типами в запросе и ответе.",
+                    f"Параметр {name} описан с форматом «{prev_fmt}»"
+                    + (f" (строка {prev.line})" if prev.line else "")
+                    + f" и с форматом «{fmt}»"
+                    + (f" (строка {b.line})." if b.line else "."),
                     [prev.text, b.text],
                     "Привести тип к одному значению во всех таблицах.",
                 )
