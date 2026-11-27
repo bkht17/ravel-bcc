@@ -111,7 +111,7 @@ def check(
 
     try:
         paths = write_outputs(report, output, run_id)
-    except ReportRenderError as e:
+    except (ReportRenderError, OSError) as e:
         typer.secho(f"Отчёт не записан: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from e
     code = orchestrator.exit_code(report)

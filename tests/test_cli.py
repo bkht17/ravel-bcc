@@ -140,6 +140,20 @@ def test_failure_mid_group_keeps_old_files_and_no_tmpdir(sample, tmp_path, monke
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted(NAMES)
 
 
+def test_oserror_on_write_gives_clean_message(sample, tmp_path, monkeypatch):
+    from ravel import fsutil
+
+    def denied(path, content):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(fsutil, "_stage", denied)
+    res = _run(sample, tmp_path / "r.md")
+    assert res.exit_code == 1
+    assert "Отчёт не записан" in res.output
+    assert "Traceback" not in res.output
+    assert isinstance(res.exception, SystemExit)
+
+
 def _run_ids(tmp_path):
     import json
 
