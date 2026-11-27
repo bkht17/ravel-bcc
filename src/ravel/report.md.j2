@@ -62,12 +62,12 @@
 
 {% set prod = r.requirements | selectattr("kind", "equalto", "requirement") | list %}
 {% set extra = r.requirements | rejectattr("kind", "equalto", "requirement") | list %}
-Всего выделено требований: **{{ prod | length }}**. Если в документе не было номера, в колонке «В документе» стоит «—», а требование идентифицируется цитатой и местом.
+Всего выделено требований: **{{ prod | length }}**. Если в документе не было номера, в колонке «В документе» стоит «—», а требование идентифицируется цитатой и местом. Абзац или пункт с несколькими независимо проверяемыми утверждениями разделён на фрагменты: «ч. 2/4» — второй из четырёх, номер пункта у всех фрагментов общий. Формулировка в таблице может быть сокращена («…»); полный текст, место и исходный абзац — в разделе 3, в карточке с тем же ID.
 
 | В отчёте | В документе | Место | Формулировка |
 | :--- | :--- | :--- | :--- |
 {% for q in prod %}
-| {{ q.id }} | {{ q.source_id or "—" }} | {{ q.location | cell(90) }} | {{ q.text | cell }} |
+| {{ q.id }} | {{ q.source_id | cell(60) if q.source_id else "—" }}{% if q.parts %} · ч. {{ q.part }}/{{ q.parts }}{% endif %} | {{ q.location | cell(90) }} | {{ q.text | cell }} |
 {% endfor %}
 
 {% if extra %}
@@ -81,13 +81,38 @@
 | {{ q.id }} | {{ "метаданные" if q.kind == "metadata" else "пример" }} | {{ q.location | cell(90) }} | {{ q.text | cell }} |
 {% endfor %}
 
+{% set long_extra = extra | selectattr("text", "truncated") | list %}
+{% if long_extra %}
+Полный текст сокращённых строк:
+
+{% for q in long_extra %}
+**{{ q.id }}** ({{ q.location | inline }}):
+
+{{ q.text | blockquote }}
+
+{% endfor %}
+{% endif %}
 {% endif %}
 ## 3. Проверка каждого требования
 
 {% for q in prod %}
-### {{ q.id }}{% if q.source_id %} ({{ q.source_id }}){% endif %}
+### {{ q.id }}{% if q.source_id %} ({{ q.source_id | inline }}){% endif %}
 
-> {{ q.text | cell(600) }}
+
+{{ q.text | blockquote }}
+
+Место: {{ q.location | inline }}{% if q.line_start and q.line_end and q.line_end != q.line_start %} (строки {{ q.line_start }}–{{ q.line_end }}){% endif %}.
+{% if q.parts %}
+
+{% set head = by_id.get(q.parent_id) if q.parent_id else none %}
+{% if q.part == 1 or not head %}
+Фрагмент {{ q.part }} из {{ q.parts }} {{ "пункта " ~ (q.source_id | inline) if q.source_id else "абзаца без номера" }}. Исходный текст целиком:
+
+{{ q.parent_text | blockquote }}
+{% else %}
+Фрагмент {{ q.part }} из {{ q.parts }} {{ "пункта " ~ (q.source_id | inline) if q.source_id else "абзаца без номера" }}; исходный текст целиком — в карточке {{ head.id }}.
+{% endif %}
+{% endif %}
 
 {% set fs = by_req.get(q.id, []) %}
 {% set sfs = set_by_req.get(q.id, []) %}
@@ -98,7 +123,7 @@
 - **{{ f.id }} · {{ SL[f.severity] }} · {{ CL[f.criterion] }}** — {{ f.title }}
   {{ f.explanation }}
 {% for qt in f.quotes %}
-  - Цитата: «{{ qt.text | cell(300) }}» ({{ qt.location }})
+  - Цитата: «{{ qt.text | inline }}» ({{ qt.location | inline }})
 {% endfor %}
 {% if f.suggestion %}
   - Как исправить: {{ f.suggestion }}
@@ -133,7 +158,7 @@
 **{{ f.title }}.** {{ f.explanation }}{% if f.requirement_ids %} Затронуты: {{ f.requirement_ids | join(", ") }}.{% endif %}
 
 {% for qt in f.quotes %}
-- Цитата: «{{ qt.text | cell(300) }}» ({{ qt.location }})
+- Цитата: «{{ qt.text | inline }}» ({{ qt.location | inline }})
 {% endfor %}
 {% if f.suggestion %}
 - Как исправить: {{ f.suggestion }}
@@ -166,7 +191,7 @@
 - Связано: {{ (q.requirement_ids + q.finding_ids) | join(", ") }}
 {% endif %}
 {% for qt in q.quotes %}
-- Цитата: «{{ qt.text | cell(300) }}» ({{ qt.location }})
+- Цитата: «{{ qt.text | inline }}» ({{ qt.location | inline }})
 {% endfor %}
 {% if q.answer %}
 - **Ответ автора:** {{ q.answer }}

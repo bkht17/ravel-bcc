@@ -11,6 +11,7 @@ import pytest
 
 from ravel.ingest import load_document
 from ravel.models import IssueLevel
+from ravel.quotes import locate
 from ravel.segment import segment
 
 from .conftest import MINI_MD, make_docx, make_pdf
@@ -138,17 +139,23 @@ def test_docx_with_damaged_xml_is_salvaged(tmp_path):
 # --- контроль покрытия, резервная нарезка, OCR ---------------------------------------------------
 
 FIXTURES = Path(__file__).parent / "fixtures"
-# число требований в табличном PDF до правок (прогон текущего кода перед изменением)
-TABLES_PDF_BASELINE = 51
-SAMPLE_REQS = 49
 
 
-def test_md_sample_requirement_count_unchanged(sample):
+def test_md_sample_context_is_classified_by_content(sample):
+    """Число требований не фиксируется: абзацы делятся на утверждения. Проверяется состав
+    не-требований: 7 строк «Общие сведения» + 5 служебных строк части B + служебная ссылка на
+    документ — метаданные; 6 блоков кода + демонстрационная команда curl — примеры."""
     reqs = segment(load_document(sample))
-    assert sum(r.kind == "requirement" for r in reqs) == SAMPLE_REQS
-    # 5 служебных строк из «Часть B» + 7 строк таблицы «Общие сведения» (раньше пропускались)
-    assert sum(r.kind == "metadata" for r in reqs) == 12
-    assert sum(r.kind == "example" for r in reqs) == 6
+    meta = [r for r in reqs if r.kind == "metadata"]
+    examples = [r for r in reqs if r.kind == "example"]
+    assert sum("Общие сведения" in r.section for r in meta) == 7
+    assert sum(r.text.startswith("Поле: ") and "Общие параметры" in r.section for r in meta) == 5
+    assert [r.text for r in meta if not r.text.startswith("Поле: ")] == [
+        "Дочерний документ части A: «Уведомление о расходах по карте — REST API»."
+    ]
+    assert sum(r.raw_text.startswith("```") for r in examples) == 6
+    assert [r.raw_text.split("|")[1].strip() for r in examples if r.raw_text.startswith("|")] == ["**CURL**"]
+    assert not [r for r in reqs if r.kind == "requirement" and "curl " in r.text]
 
 
 def test_printed_pdf_is_not_silently_lost(sample):
@@ -161,12 +168,18 @@ def test_printed_pdf_is_not_silently_lost(sample):
     assert "low_coverage" not in codes(doc) or "fallback_segmentation" in codes(doc)
 
 
-def test_tables_pdf_not_worse():
+def test_tables_pdf_not_worse(sample):
+    """Не число требований, а содержание: требования MD-источника находятся в тексте этого PDF.
+
+    До деления абзацев на утверждения: 46 из 49 (94 %) находились в PDF, 63 % — в его требованиях.
+    """
     doc = load_document(FIXTURES / "requirements_tables.pdf")
-    # baseline — число именно требований; строки «Общие сведения» теперь метаданные и не в счёте
-    n = sum(r.kind == "requirement" for r in segment(doc))
-    assert abs(n - TABLES_PDF_BASELINE) <= 0.1 * TABLES_PDF_BASELINE
     assert "low_coverage" not in codes(doc)
+    md_reqs = [r for r in segment(load_document(sample)) if r.kind == "requirement"]
+    pdf_req_blocks = {r.block_id for r in segment(doc) if r.kind == "requirement"}
+    where = [locate(r.text, doc) for r in md_reqs]
+    assert sum(b is not None for b in where) >= 0.95 * len(md_reqs)
+    assert sum(b is not None and b.id in pdf_req_blocks for b in where) >= 0.65 * len(md_reqs)
 
 
 def test_scan_is_ocr_low_quality_without_requirements():

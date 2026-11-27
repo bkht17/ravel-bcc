@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections import Counter
 from importlib.resources import files
@@ -18,10 +19,46 @@ from ravel.fsutil import atomic_write_group
 from ravel.models import CRITERION_LABELS, SEVERITY_LABELS, Question, Report, Severity
 from ravel.orchestrator import coverage, llm_mode, noncritical_failures, undecided_reasons
 
+# «<» перед буквой, «/», «!» или «?» markdown-просмотрщик примет за HTML-тег и спрячет текст
+_TAG_START = re.compile(r"<(?=[A-Za-z/!?])")
+_SPACES = re.compile(r"[ \t\r\f\v]*\n[ \t\r\f\v\n]*|[ \t\r\f\v]+")
 
-def _cell(text: str | None, limit: int = 160) -> str:
-    text = (text or "").replace("|", "\\|").replace("\n", " ").strip()
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+# Ячейка таблицы нарезки: столько символов формулировки, дальше «…» (полный текст — в разделе 3)
+CELL_LIMIT = 160
+
+
+def _escape(text: str, table: bool = False) -> str:
+    """Текст документа как данные: «<tag>» не исчезает; в ячейке таблицы «|» не делит ячейку."""
+    if table:
+        text = text.replace("|", "\\|")
+    return _TAG_START.sub(r"\\<", text)
+
+
+def _one_line(text: str | None) -> str:
+    return _SPACES.sub(" ", text or "").strip()
+
+
+def _cell(text: str | None, limit: int = CELL_LIMIT) -> str:
+    """Ячейка таблицы: одна строка, сокращение до limit символов."""
+    text = _one_line(text)
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return _escape(text, table=True)
+
+
+def _truncated(text: str | None, limit: int = CELL_LIMIT) -> bool:
+    return len(_one_line(text)) > limit
+
+
+def _inline(text: str | None) -> str:
+    """Полная цитата в строке списка: без сокращения, переносы строк — пробелы."""
+    return _escape(_one_line(text))
+
+
+def _blockquote(text: str | None) -> str:
+    """Полный текст цитатой markdown с сохранением переносов строк."""
+    lines = _escape((text or "").strip()).split("\n")
+    return "\n".join(f"> {ln.rstrip()}  " if ln.strip() else ">" for ln in lines).rstrip()
 
 
 def render_markdown(report: Report, run_id: str | None = None) -> str:
@@ -32,6 +69,9 @@ def render_markdown(report: Report, run_id: str | None = None) -> str:
         keep_trailing_newline=True,
     )
     env.filters["cell"] = _cell
+    env.filters["inline"] = _inline
+    env.filters["blockquote"] = _blockquote
+    env.tests["truncated"] = _truncated
     template = env.from_string(files("ravel").joinpath("report.md.j2").read_text(encoding="utf-8"))
 
     by_req: dict[str, list] = {r.id: [] for r in report.requirements}
@@ -47,7 +87,10 @@ def render_markdown(report: Report, run_id: str | None = None) -> str:
             set_by_req.setdefault(rid, []).append(f)
     sev = Counter(f.severity for f in report.findings)
     crit_counter = Counter(f.criterion for f in report.findings)
-    reqs_with_defects = len({rid for f in report.findings for rid in f.requirement_ids})
+    # «Требований с нарушениями» — уникальные продуктовые ID: метаданные и примеры не требования
+    product_ids = {r.id for r in report.requirements if r.kind == "requirement"}
+    reqs_with_defects = len({rid for f in report.findings for rid in f.requirement_ids if rid in product_ids})
+    by_id = {r.id: r for r in report.requirements}
 
     done, total = coverage(report)
     return template.render(
@@ -67,6 +110,7 @@ def render_markdown(report: Report, run_id: str | None = None) -> str:
         sev={s: sev.get(s, 0) for s in Severity},
         by_criterion=sorted(crit_counter.items(), key=lambda kv: -kv[1]),
         reqs_with_defects=reqs_with_defects,
+        by_id=by_id,
         CL=CRITERION_LABELS,
         SL=SEVERITY_LABELS,
     )

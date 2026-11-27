@@ -96,6 +96,30 @@ def _order(doc: DocumentIR, prefer: Iterable[str] | None) -> list[Block]:
     return [b for b in doc.blocks if b.id in first] + [b for b in doc.blocks if b.id not in first]
 
 
+def _locate_in_parent(q_alnum: str, doc: DocumentIR, blocks: list[Block]) -> Block | None:
+    """Цитата через несколько фрагментов одного абзаца: возвращается фрагмент, где она начинается."""
+    groups: dict[str, list[Block]] = {}
+    for b in doc.blocks:
+        if b.parent_id and b.parent_text is not None and b.offset is not None:
+            groups.setdefault(b.parent_id, []).append(b)
+    seen: set[str] = set()
+    for b in blocks:
+        if not b.parent_id or b.parent_id in seen or b.parent_id not in groups:
+            continue
+        seen.add(b.parent_id)
+        parts = groups[b.parent_id]
+        parent = parts[0].parent_text or ""
+        pos = _alnum(parent).find(q_alnum)
+        if pos < 0:
+            continue
+        for f in parts:
+            # длина «слов через пробел» до конца фрагмента: цитата начинается в нём, если раньше
+            if pos < len(_alnum(parent[: (f.offset or 0) + len(f.text)])) - 1:
+                return f
+        return parts[-1]
+    return None
+
+
 def locate(
     quote: str, doc: DocumentIR, fuzzy: bool = True, prefer: Iterable[str] | None = None
 ) -> Block | None:
@@ -118,6 +142,9 @@ def locate(
         i = by_pos[b.id]
         if i + 1 < len(doc.blocks) and q_alnum in _alnum(b.text + " " + doc.blocks[i + 1].text):
             return b
+
+    if found := _locate_in_parent(q_alnum, doc, blocks):
+        return found
 
     if fuzzy:
         q_tokens = _tokens(quote)

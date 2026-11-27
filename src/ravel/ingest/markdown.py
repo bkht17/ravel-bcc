@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from ravel.ingest.sentences import split_spans
 from ravel.models import Block, BlockKind
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -45,13 +46,86 @@ def strip_inline(text: str) -> str:
     return _INLINE.sub("", text).strip()
 
 
+_CELL_BREAK = re.compile(r"\s*<br\s*/?>\s*", re.IGNORECASE)
+
+
 def _split_row(line: str) -> list[str]:
+    """Ячейки строки таблицы. «\\|» — вертикальная черта внутри ячейки, а не граница;
+    «<br>» — перенос строки внутри ячейки (так его пишут GFM и pymupdf4llm), в тексте — пробел."""
     line = line.strip()
     if line.startswith("|"):
         line = line[1:]
-    if line.endswith("|"):
+    if line.endswith("|") and not line.endswith("\\|"):
         line = line[:-1]
-    return [strip_inline(c) for c in line.split("|")]
+    cells, cur, i = [], [], 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] in "|\\":
+            cur.append(line[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    cells.append("".join(cur))
+    return [strip_inline(_CELL_BREAK.sub(" ", c)) for c in cells]
+
+
+def compose(pieces: list[tuple[int, str]]) -> tuple[str, list[tuple[int, int]]]:
+    """Строки абзаца → (текст без inline-разметки, [(позиция начала строки в тексте, номер строки)])."""
+    parts: list[str] = []
+    starts: list[tuple[int, int]] = []
+    pos = 0
+    for line_no, piece in pieces:
+        part = _INLINE.sub("", piece.strip())
+        if parts:
+            pos += 1  # пробел между строками
+        starts.append((pos, line_no))
+        parts.append(part)
+        pos += len(part)
+    joined = " ".join(parts)
+    lead = len(joined) - len(joined.lstrip())
+    return joined.strip(), [(max(0, p - lead), n) for p, n in starts]
+
+
+def _line_at(starts: list[tuple[int, int]], offset: int) -> int:
+    line = starts[0][1]
+    for pos, n in starts:
+        if pos > offset:
+            break
+        line = n
+    return line
+
+
+def add_statements(blocks: list[Block], add, kind: BlockKind, pieces: list[tuple[int, str]]) -> None:
+    """Абзац или пункт списка: целиком, если в нём одно утверждение, иначе по фрагменту на каждое.
+
+    Фрагмент — дословная часть текста абзаца со своей строкой; родитель (весь абзац), номер
+    фрагмента и позиция в родителе сохраняются в полях блока.
+    """
+    text, starts = compose(pieces)
+    if not text:
+        return
+    spans = split_spans(text)
+    if len(spans) < 2:
+        add(kind, text, starts[0][1])
+        return
+    first_id = f"B-{len(blocks) + 1:04d}"
+    for k, (a, b) in enumerate(spans, start=1):
+        add(
+            kind,
+            text[a:b],
+            _line_at(starts, a),
+            line_end=_line_at(starts, b - 1),
+            parent_id=first_id,
+            parent_text=text,
+            part=k,
+            parts=len(spans),
+            offset=a,
+        )
 
 
 def parse_markdown(md: str, page_of_line: dict[int, int] | None = None) -> tuple[str, list[Block]]:
@@ -79,6 +153,9 @@ def parse_markdown(md: str, page_of_line: dict[int, int] | None = None) -> tuple
             )
         )
 
+    def add_text(kind: BlockKind, pieces: list[tuple[int, str]]) -> None:
+        add_statements(blocks, add, kind, pieces)
+
     i = 0
     para: list[str] = []
     para_start = 0
@@ -92,7 +169,7 @@ def parse_markdown(md: str, page_of_line: dict[int, int] | None = None) -> tuple
             if len(marks) >= 2:
                 cuts = ([0] if marks[0] != 0 else []) + marks
             for a, b in zip(cuts, [*cuts[1:], len(para)], strict=True):
-                add(BlockKind.paragraph, strip_inline(" ".join(p.strip() for p in para[a:b])), para_start + a)
+                add_text(BlockKind.paragraph, [(para_start + k, para[k]) for k in range(a, b)])
             para = []
 
     while i < len(lines):
@@ -159,8 +236,7 @@ def parse_markdown(md: str, page_of_line: dict[int, int] | None = None) -> tuple
 
         if m := _LIST.match(line):
             flush_para()
-            start = line_no
-            item = [m.group(2)]
+            item = [(line_no, m.group(2))]
             indent = len(m.group(1))
             i += 1
             # продолжение пункта: строки с отступом, не начинающие новый пункт
@@ -170,9 +246,9 @@ def parse_markdown(md: str, page_of_line: dict[int, int] | None = None) -> tuple
                 and not _LIST.match(lines[i])
                 and len(lines[i]) - len(lines[i].lstrip()) > indent
             ):
-                item.append(lines[i].strip())
+                item.append((i + 1, lines[i]))
                 i += 1
-            add(BlockKind.list_item, strip_inline(" ".join(item)), start)
+            add_text(BlockKind.list_item, item)
             continue
 
         if not para:

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
+from ravel.ingest.pdf_layout import repair_pages
 from ravel.ingest.quality import assess, native_is_suspicious, ocr_is_poor
 from ravel.ingest.sniff import garbage_ratio
 from ravel.models import IngestIssue, IssueLevel
@@ -246,11 +247,24 @@ def _pages_via_pymupdf4llm(doc: pymupdf.Document, issues: list[IngestIssue]) -> 
             )
         )
         return []
+    # таблицы по линиям сетки, заголовки, принятые за колонтитул, двойные маркеры списков
+    try:
+        texts = repair_pages(doc, chunks, issues)
+    except Exception as e:
+        texts = [chunk.get("text") or "" for chunk in chunks]
+        issues.append(
+            IngestIssue(
+                level=IssueLevel.warning,
+                code="pdf_table_degraded",
+                message=f"Таблицы PDF не удалось сверить с текстовым слоем ({type(e).__name__}); "
+                "колонки и значения таблиц могут быть сдвинуты.",
+            )
+        )
     pages = []
-    for idx, chunk in enumerate(chunks, start=1):
+    for idx, (chunk, text) in enumerate(zip(chunks, texts, strict=True), start=1):
         meta = chunk.get("metadata") or {}
         page_no = meta.get("page_number") or meta.get("page") or idx
-        pages.append((int(page_no), chunk.get("text") or ""))
+        pages.append((int(page_no), text))
     return pages
 
 

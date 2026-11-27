@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from ravel.ingest.markdown import strip_inline
+from ravel.ingest.markdown import add_statements, strip_inline
 from ravel.models import Block, BlockKind
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
@@ -53,7 +53,8 @@ def parse_fallback(md: str, page_of_line: dict[int, int] | None = None) -> list[
     def flush() -> None:
         nonlocal buf, kind
         if buf:
-            add(kind, strip_inline(" ".join(x.strip() for x in buf)), start)
+            # строки буфера идут подряд, без пустых: номер строки — start + позиция в буфере
+            add_statements(blocks, add, kind, [(start + k, x) for k, x in enumerate(buf)])
         buf, kind = [], BlockKind.paragraph
 
     for n, line in enumerate(md.split("\n"), start=1):
