@@ -174,3 +174,41 @@ def test_quote_across_several_fragments_is_found(sample):
     )
     block = locate(quote, doc)
     assert block is not None and block.text == "В расходы входят проведённые покупки."
+
+
+def test_explicit_prose_example_fragments_remain_context(tmp_path):
+    _, doc = _doc(
+        tmp_path,
+        "# Бронирование\n\n"
+        "Пример: сотрудник бронирует комнату с 10:00 до 13:00. Бронь создана.\n\n"
+        "Сервис должен показывать пример бронирования.\n",
+    )
+    reqs = segment(doc)
+    assert [r.kind for r in reqs] == ["requirement", "example", "example"]
+    assert reqs[0].text == "Сервис должен показывать пример бронирования."
+    examples = [r for r in reqs if r.kind == "example"]
+    assert examples[1].parent_id == examples[0].id
+    assert all(locate(r.text, doc) for r in examples)
+
+
+def test_prose_example_can_prove_set_contradiction(tmp_path):
+    path, doc = _doc(
+        tmp_path,
+        "# Бронирование\n\n"
+        "Одна бронь длится не дольше 2 часов.\n\n"
+        "Пример: бронь с 10:00 до 13:00 успешно создаётся.\n",
+    )
+    reqs = segment(doc)
+    product = next(r for r in reqs if r.kind == "requirement")
+    example = next(r for r in reqs if r.kind == "example")
+    found = _finding([product.id, example.id], [product.text, example.text], criterion="set_consistent")
+    model = FakeLLM(
+        {
+            "LLMFacts": [_facts(("timing_latency", "Длительность", product.text))],
+            "LLMSetFindings": [json.dumps({"findings": [found]})],
+        }
+    )
+    report = orchestrator.run(path, model)
+    sets = [f for f in report.findings if f.source == "llm:set"]
+    assert len(sets) == 1 and sets[0].requirement_ids == [product.id]
+    assert len(sets[0].quotes) == 2

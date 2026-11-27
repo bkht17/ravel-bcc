@@ -67,6 +67,7 @@ _REFERENCE = re.compile(
 )
 # Команда-пример: вызов сетевой утилиты из командной строки
 _COMMAND = re.compile(r"^\s*(?:\$\s+)?(?:curl|wget|grpcurl)\s+\S", re.IGNORECASE)
+_EXAMPLE_PREFIX = re.compile(r"^(?:пример(?:ы)?|example(?:s)?|sample(?:s)?)\s*[:—–]\s*\S", re.IGNORECASE)
 _EXAMPLE_FIELD = re.compile(r"^(?:curl|wget|пример\w*|example\w*|sample\w*)$", re.IGNORECASE)
 _LIST_ANY = re.compile(r"^(\s*)(?:[-*+•]|\d+[.)])\s+")
 _FENCE_LANG = re.compile(r"^\s*`{3,}\s*([\w+-]*)")
@@ -158,14 +159,14 @@ def _short(block: Block) -> bool:
 
 
 def context_kind(block: Block) -> str | None:
-    """«metadata» для служебной ссылки на документ, «example» для команды-примера, иначе None."""
+    """«metadata» для служебной ссылки на документ, «example» для явно помеченного примера, иначе None."""
     if block.kind == BlockKind.table_row:
         cells = [c.strip() for c in block.cells or []]
         if cells and _EXAMPLE_FIELD.match(cells[0]) or any(_COMMAND.match(c) for c in cells):
             return "example"
         return None
     if block.kind in (BlockKind.paragraph, BlockKind.list_item):
-        if _COMMAND.match(block.text):
+        if _COMMAND.match(block.text) or _EXAMPLE_PREFIX.match(block.parent_text or block.text):
             return "example"
         if _REFERENCE.match(block.text):
             return "metadata"

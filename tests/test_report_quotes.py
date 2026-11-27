@@ -10,6 +10,7 @@ import pytest
 
 from ravel import orchestrator
 from ravel.models import (
+    REQUIREMENT_CRITERIA,
     SET_CRITERIA,
     Criterion,
     Finding,
@@ -164,3 +165,36 @@ def test_set_findings_have_set_level_criteria(name):
     touched = {rid for f in report.findings for rid in f.requirement_ids}
     assert touched <= product
     assert f"| Требований с нарушениями | {len(touched)} |" in md
+
+
+@pytest.mark.parametrize("kind", ["metadata", "example"])
+@pytest.mark.parametrize("criterion", sorted(REQUIREMENT_CRITERIA - SET_CRITERIA))
+def test_requirement_only_criterion_needs_product_target(tmp_path, kind, criterion):
+    from ravel.agents.base import RunContext
+    from ravel.agents.critic import CriticAgent
+    from ravel.ingest import load_document
+    from ravel.segment import segment
+
+    path = tmp_path / "context.md"
+    text = (
+        "Родительский документ: «Описание системы»."
+        if kind == "metadata"
+        else "Пример: экран открывается быстро."
+    )
+    path.write_text("# Описание\n\n" + text, encoding="utf-8")
+    doc = load_document(path)
+    reqs = segment(doc)
+    assert len(reqs) == 1 and reqs[0].kind == kind
+    finding = Finding(
+        scope="requirement",
+        criterion=criterion,
+        severity=Severity.major,
+        title="Проверка контекста",
+        explanation="Контекст не является требованием.",
+        suggestion="Уточнить текст.",
+        quotes=[Quote(text=text)],
+        source="lint:test",
+    )
+    ctx = RunContext(doc=doc, requirements=reqs, findings=[finding])
+    assert CriticAgent().run(ctx) == 0
+    assert ctx.dropped_unverified == 1

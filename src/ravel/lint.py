@@ -470,6 +470,8 @@ _COMPARE = re.compile(
     r"|пересека|[≥≤<>]",
     re.I,
 )
+# Для связи разных утверждений нужен глагол сравнения, одного слова «лимит» мало.
+_UNIT_RELATION = re.compile(r"сравни|сопостав|превыша|достига|[≥≤<>]", re.I)
 _CONVERSION = re.compile(
     r"×\s*\d|[*/]\s*\d|умнож|дел(?:ить|ит\w*|[её]н\w*|ени\w*)|пересчит|пересчёт|пересчет|конверт|курс"
     r"|\d[\d\s.,]*[^\d\s=]+\s*=\s*\d|\d[\d\s.,]*[^\d\s]+\s+как\s+\d",
@@ -525,6 +527,50 @@ def _unit_groups(blocks: list[Block]) -> list[list[Block]]:
     return list(groups.values())
 
 
+def _unit_terms(text: str, mentions: list[tuple[int, int, str, str]]) -> set[str]:
+    """Названия величин без единиц, общего предиката и числительных."""
+    for start, end, _, _ in reversed(mentions):
+        text = text[:start] + " " + text[end:]
+    return {
+        word
+        for word in re.findall(r"[^\W\d_]{4,}", text.lower())
+        if word not in {"система", "сервис", "должен", "должна", "значение", "когда", "если", "после"}
+        and not _COMPARE.search(word)
+    }
+
+
+def _related_unit_pair(
+    first: list[tuple[Block, int]],
+    second: list[tuple[Block, int]],
+    terms: dict[str, set[str]],
+    comparing: set[str],
+) -> tuple[tuple[Block, int], tuple[Block, int]] | None:
+    """Одна подтверждённая пара упоминаний, независимо от порядка блоков.
+
+    В одном блоке достаточно сравнения. Между блоками сравнение должно повторять
+    название величины. Индекс слов второго списка позволяет обойти оба списка линейно,
+    не сравнивая все блоки друг с другом. Синонимы остаются модельной проверке.
+    """
+    second_by_block = {b.id: (b, i) for b, i in second}
+    for b, i in first:
+        if _COMPARE.search(b.text) and b.id in second_by_block:
+            return (b, i), second_by_block[b.id]
+
+    any_by_term: dict[str, tuple[Block, int]] = {}
+    comparison_by_term: dict[str, tuple[Block, int]] = {}
+    for b, i in second:
+        for term in sorted(terms[b.id]):
+            any_by_term.setdefault(term, (b, i))
+            if b.id in comparing:
+                comparison_by_term.setdefault(term, (b, i))
+    for b, i in first:
+        candidates = any_by_term if b.id in comparing else comparison_by_term
+        for term in sorted(terms[b.id]):
+            if term in candidates:
+                return (b, i), candidates[term]
+    return None
+
+
 def mixed_units(doc: DocumentIR) -> list[Finding]:
     """Величины одного измерения в разных единицах сравниваются без правила пересчёта."""
     out = []
@@ -533,22 +579,25 @@ def mixed_units(doc: DocumentIR) -> list[Finding]:
         group_text = "\n".join(b.text for b in group)
         if _CONVERSION.search(group_text):
             continue
-        # первое упоминание каждой единицы в группе: (блок, индекс упоминания)
-        first: dict[tuple[str, str], tuple[Block, int]] = {}
+        terms = {b.id: _unit_terms(b.text, mentions[b.id]) for b in group}
+        comparing = {b.id for b in group if _UNIT_RELATION.search(b.text)}
+        # Все упоминания единицы: раннее несвязанное упоминание не должно скрыть сравнение.
+        occurrences: dict[tuple[str, str], list[tuple[Block, int]]] = {}
         for b in group:
             for i, (_, _, dim, name) in enumerate(mentions[b.id]):
-                first.setdefault((dim, name), (b, i))
-        keys = list(first)
+                occurrences.setdefault((dim, name), []).append((b, i))
+        keys = list(occurrences)
         for x in range(len(keys)):
             for y in range(x + 1, len(keys)):
                 (dim1, u1), (dim2, u2) = keys[x], keys[y]
                 if dim1 != dim2:
                     continue
-                (b1, i1), (b2, i2) = first[keys[x]], first[keys[y]]
-                if not _COMPARE.search(b1.text + "\n" + b2.text):
+                pair = _related_unit_pair(occurrences[keys[x]], occurrences[keys[y]], terms, comparing)
+                if pair is None:
                     continue
-                q1 = _mention_quote(b1.text, mentions[b1.id], i1)
-                q2 = _mention_quote(b2.text, mentions[b2.id], i2)
+                (b1, i1), (b2, i2) = pair
+                q1 = b1.text if b1.id != b2.id else _mention_quote(b1.text, mentions[b1.id], i1)
+                q2 = b2.text if b1.id != b2.id else _mention_quote(b2.text, mentions[b2.id], i2)
                 out.append(
                     _f(
                         "mixed_units",

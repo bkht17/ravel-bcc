@@ -197,18 +197,29 @@ def test_empty_review_list_leaves_requirements_unchecked(sample):
     assert len(llm.users("LLMFindings")) == 2 * batches  # пачка и один повтор, не больше
 
 
-def test_missing_ids_are_rechecked_once(sample):
-    first = _findings(_finding("R-006", F2), reviewed=["R-001", "R-002"])
-    llm = FakeLLM({"LLMFindings": [first], "LLMFacts": [GOOD_FACTS]})  # дальше подтверждает всё
+def test_missing_ids_are_rechecked_once(tmp_path):
+    sample = tmp_path / "batch.md"
+    statements = [
+        "Сервис принимает заявки.",
+        "Сервис хранит номер заявки.",
+        "Клиент получает подтверждение заявки.",
+        "Клиент видит состояние заявки.",
+        "Сервис отклоняет пустую заявку.",
+        "Сервис записывает результат проверки заявки.",
+    ]
+    sample.write_text("# Заявки\n\n" + "\n\n".join(statements), encoding="utf-8")
+    first = _findings(_finding("R-006", statements[-1]), reviewed=["R-001", "R-002"])
+    llm = FakeLLM({"LLMFindings": [first]})  # дальше подтверждает всё
     report = orchestrator.run(sample, llm)
     assert all(r.checked for r in _product(report))
-    retry = llm.users("LLMFindings")[1]
-    assert "[R-003]" in retry and "[R-005]" in retry
-    assert "[R-006]" in retry  # находка не заменяет подтверждения в reviewed_ids
-    assert "[R-001]" not in retry
-    assert not report.llm_failures
+    requests = llm.users("LLMFindings")
+    assert len(requests) == 2  # ровно один повтор только для четырёх пропусков
+    retry = requests[1]
+    assert re.findall(r"^\[(R-\d+)\]", retry, re.M) == ["R-003", "R-004", "R-005", "R-006"]
+    assert not any(m.startswith("checker:") for m in report.llm_failures)
     # находка из ответа без подтверждения не теряется: она проверена Critic и остаётся
-    assert len([f for f in report.findings if f.source == "llm:checker"]) == 1
+    findings = [f for f in report.findings if f.source == "llm:checker"]
+    assert len(findings) == 1 and findings[0].requirement_ids == ["R-006"]
 
 
 def test_rejected_finding_does_not_mark_unreviewed_requirement_checked(sample):
@@ -397,7 +408,9 @@ def test_mixed_models_are_traceable_per_stage_and_requirement(sample):
     assert by["fake-1"] == [f"R-{i:03d}" for i in range(1, 13)]  # две пачки до перехода
     assert set(by) == {"fake-1", "fake-lite"}
     steps = {t.agent: t.models for t in report.trace}
-    assert steps["checker"] == {"fake-1": 2, "fake-lite": 7}
+    batches = -(-len(_product(report)) // BATCH)
+    assert steps["checker"] == {"fake-1": 2, "fake-lite": batches - 2}
+    assert by["fake-lite"] == [r.id for r in _product(report)[2 * BATCH :]]
     assert steps["set_checker"] == {"fake-lite": 2} and steps["clarifier"] == {"fake-lite": 1}
     assert report.passport.model.startswith("fake-1 → fake-lite")
 

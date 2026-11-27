@@ -12,7 +12,7 @@ TODO(B): LLM-режим с инструментами search_document/get_sectio
 from __future__ import annotations
 
 from ravel.agents.base import Agent, RunContext
-from ravel.models import REQUIREMENT_CRITERIA, SEVERITY_ORDER, Criterion, Finding
+from ravel.models import REQUIREMENT_CRITERIA, SET_CRITERIA, SEVERITY_ORDER, Criterion, Finding
 from ravel.quotes import locate, norm
 
 
@@ -35,12 +35,17 @@ class CriticAgent(Agent):
             if not ok:
                 ctx.dropped_unverified += 1
                 continue
+            if f.criterion not in SET_CRITERIA and not f.requirement_ids:
+                # Свойство отдельного требования требует продуктового адресата. Цитата из
+                # служебного блока не позволяет произвольно заменить его свойством набора.
+                ctx.dropped_unverified += 1
+                continue
             f.verified = True
             # находка с критерием отдельного требования и известными ID — это находка по
             # требованиям: она должна появиться в их карточках, а не только в разделе набора
             if f.criterion in REQUIREMENT_CRITERIA and f.requirement_ids:
                 f.scope = "requirement"
-            if f.scope == "requirement" and not f.requirement_ids:
+            if f.criterion not in REQUIREMENT_CRITERIA or not f.requirement_ids:
                 f.scope = "set"
             kept.append(f)
 
