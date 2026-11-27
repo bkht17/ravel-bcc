@@ -83,7 +83,9 @@ def run(
             continue
         if on_step:
             on_step(agent.name)
-        calls0, hits0 = (llm.calls, llm.cache_hits) if llm else (0, 0)
+        # счётчики берём у client: llm обнуляется при сбое, а вызовы этого этапа уже потрачены
+        calls0, hits0 = (client.calls, client.cache_hits) if client else (0, 0)
+        answers0 = dict(client.answers) if client else {}
         t0, at = time.perf_counter(), datetime.now().astimezone()
         try:
             produced = agent.run(ctx)
@@ -102,8 +104,9 @@ def run(
                 agent=agent.name,
                 started_at=at,
                 seconds=round(time.perf_counter() - t0, 2),
-                calls=(llm.calls - calls0) if llm else 0,
-                cache_hits=(llm.cache_hits - hits0) if llm else 0,
+                calls=(client.calls - calls0) if client else 0,
+                cache_hits=(client.cache_hits - hits0) if client else 0,
+                models=_answers_since(client, answers0),
                 produced=produced,
                 note=note,
             )
@@ -118,6 +121,13 @@ def run(
     report.llm_failures = ctx.llm_failures
     report.verdict = verdict(report)
     return report
+
+
+def _answers_since(client: LLMClient | None, before: dict[str, int]) -> dict[str, int]:
+    if client is None:
+        return {}
+    diff = {m: n - before.get(m, 0) for m, n in client.answers.items()}
+    return {m: n for m, n in diff.items() if n}
 
 
 # Предупреждения чтения, после которых текст не потерян: прогон можно считать полным.

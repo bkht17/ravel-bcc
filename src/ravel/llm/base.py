@@ -147,6 +147,9 @@ class LLMClient(ABC):
         )
         self.calls = 0
         self.cache_hits = 0
+        # принятые ответы по моделям (из сети и из кэша): трасса показывает, какая модель отвечала на
+        # каждом этапе, когда в прогоне был переход на запасную
+        self.answers: dict[str, int] = {}
         self.exhausted: QuotaExhausted | None = None
         self._secrets: tuple[str, ...] = ()
         self._backoff = wait_exponential_jitter(initial=1, max=MAX_RETRY_WAIT)
@@ -184,6 +187,7 @@ class LLMClient(ABC):
                 result = schema.model_validate_json(cached)
                 self.cache_hits += 1
                 self._emit(f"{what}: из кэша")
+                self._answered()
                 return result
             except ValidationError:
                 pass  # схема поменялась — перезапросим
@@ -208,7 +212,11 @@ class LLMClient(ABC):
                 ) from e2
         # ключ по модели, которая ответила: ответ запасной модели не должен выдаваться за ответ основной
         self._cache_put(self._key(system, user, schema), raw)
+        self._answered()
         return result
+
+    def _answered(self) -> None:
+        self.answers[self.model] = self.answers.get(self.model, 0) + 1
 
     # ---------------------------------------------------------------- retries
 
