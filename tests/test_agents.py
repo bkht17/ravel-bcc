@@ -208,6 +208,18 @@ def test_contradiction_needs_both_sides(sample):
     assert report.dropped_unverified == 1
 
 
+def test_ranked_is_one_minor_document_remark(sample):
+    """«Нет приоритетов» и «нет стабильности» — одно замечание к документу, не к каждому R."""
+    importance = _finding(["R-001", "R-002"], F3, criterion="ranked", severity="major")
+    stability = dict(importance, explanation="нет стабильности", quotes=[F4])
+    llm = FakeLLM({"LLMFacts": [GOOD_FACTS], "LLMSetFindings": [_findings(importance, stability)]})
+    report = orchestrator.run(sample, llm)
+    ranked = [f for f in report.findings if f.criterion == "ranked"]
+    assert len(ranked) == 1
+    assert ranked[0].severity == "minor" and ranked[0].requirement_ids == []
+    assert "нет стабильности" in ranked[0].explanation
+
+
 def test_lint_finding_with_requirements_shows_in_cards(sample):
     """Аудит: F-001 (GET) касался R-017/R-018, а их карточки писали «нарушений не найдено»."""
     report = orchestrator.run(sample, llm=None)

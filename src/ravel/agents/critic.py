@@ -97,7 +97,8 @@ def _verify_llm(f: Finding, ctx: RunContext, block_of: dict[str, str], rid_of: d
 
     if f.criterion == Criterion.set_consistent and len({q.block_id for q in f.quotes}) < 2:
         return False  # противоречию нужны обе стороны
-    f.requirement_ids = sorted(set(claimed) | set(quoted))
+    # ranked — свойство документа целиком: цитата лишь пример, к требованиям не привязываем
+    f.requirement_ids = [] if f.criterion == Criterion.ranked else sorted(set(claimed) | set(quoted))
     return True
 
 

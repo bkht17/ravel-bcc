@@ -194,9 +194,19 @@ class SetCheckerAgent(Agent):
             return 0
         valid = {r.id for r in product}  # M- и E- не засчитываются как затронутые требования
         produced = 0
+        ranked: Finding | None = None
         for f in out.findings:
             finding = _to_finding(f, "set", "llm:set", valid)
-            if finding.quotes:
-                ctx.findings.append(finding)
-                produced += 1
+            if not finding.quotes:
+                continue
+            if finding.criterion == Criterion.ranked:
+                # IEEE 830 4.3.5 — свойство документа целиком: одно замечание minor, без привязки
+                # к каждому требованию (иначе оно повторяется во всех карточках)
+                finding.severity, finding.requirement_ids = Severity.minor, []
+                if ranked is not None:
+                    ranked.explanation += " " + finding.explanation
+                    continue
+                ranked = finding
+            ctx.findings.append(finding)
+            produced += 1
         return produced
