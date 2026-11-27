@@ -133,7 +133,6 @@ class CheckerAgent(Agent):
         # ID только из этой пачки: модель не может приписать дефект чужому требованию
         valid = {r.id for r in batch}
         produced = 0
-        flagged: set[str] = set()
         for f in out.findings:
             finding = _to_finding(f, "requirement", "llm:checker", valid)
             if f.requirement_ids and not finding.requirement_ids:
@@ -141,13 +140,14 @@ class CheckerAgent(Agent):
                 continue
             if finding.quotes:
                 ctx.findings.append(finding)
-                flagged.update(finding.requirement_ids)
                 produced += 1
-        # «проверено» — только то, что модель явно подтвердила (или по чему вернула находку):
-        # пустой ответ не превращается в «нарушений не найдено» для всей пачки
-        confirmed = (set(out.reviewed_ids) & valid) | flagged
+        # «проверено» — только то, что модель явно перечислила в reviewed_ids. Находка проверку не
+        # подтверждает: Critic может её отклонить (выдуманная цитата), и требование тогда
+        # ошибочно получило бы «нарушений не найдено». Пустой ответ тоже ничего не подтверждает.
+        confirmed = set(out.reviewed_ids) & valid
         for r in batch:
-            r.checked = r.checked or r.id in confirmed
+            if not r.checked and r.id in confirmed:
+                r.checked, r.checked_by = True, self.llm.model  # модель, которая реально ответила
         return produced
 
 

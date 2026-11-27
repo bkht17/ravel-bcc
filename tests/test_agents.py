@@ -170,14 +170,38 @@ def test_empty_review_list_leaves_requirements_unchecked(sample):
 
 
 def test_missing_ids_are_rechecked_once(sample):
-    first = _findings(_finding("R-006", F2), reviewed=["R-001", "R-002"])  # R-006 — по находке
+    first = _findings(_finding("R-006", F2), reviewed=["R-001", "R-002"])
     llm = FakeLLM({"LLMFindings": [first], "LLMFacts": [GOOD_FACTS]})  # дальше подтверждает всё
     report = orchestrator.run(sample, llm)
     assert all(r.checked for r in _product(report))
     retry = llm.users("LLMFindings")[1]
     assert "[R-003]" in retry and "[R-005]" in retry
-    assert "[R-001]" not in retry and "[R-006]" not in retry
+    assert "[R-006]" in retry  # находка не заменяет подтверждения в reviewed_ids
+    assert "[R-001]" not in retry
     assert not report.llm_failures
+    # находка из ответа без подтверждения не теряется: она проверена Critic и остаётся
+    assert len([f for f in report.findings if f.source == "llm:checker"]) == 1
+
+
+def test_rejected_finding_does_not_mark_unreviewed_requirement_checked(sample):
+    """Регрессия: R-002 нет в reviewed_ids, его единственная находка с выдуманной цитатой снята
+    Critic — R-002 должен остаться непроверенным, а не получить «нарушений не найдено»."""
+    others = ["R-001", "R-003", "R-004", "R-005", "R-006"]
+    invented = _finding("R-002", "Порог хранится в долларах США")
+    llm = FakeLLM(
+        {
+            "LLMFindings": [_findings(invented, reviewed=others), _findings(reviewed=[])],
+            "LLMFacts": [GOOD_FACTS],
+        }
+    )
+    report = orchestrator.run(sample, llm)
+    r002 = next(r for r in report.requirements if r.id == "R-002")
+    assert not r002.checked
+    assert report.dropped_unverified == 1
+    assert not [f for f in report.findings if "R-002" in f.requirement_ids and f.source.startswith("llm")]
+    assert any("не подтвердила проверку R-002" in m for m in report.llm_failures)
+    assert report.verdict.status == "undecided"
+    assert orchestrator.exit_code(report) == 2
 
 
 def test_metadata_and_examples_are_not_sent_to_checker(sample):
@@ -308,6 +332,42 @@ def test_overloaded_primary_model_hands_over_to_fallback(sample):
     report = orchestrator.run(sample, llm)
     assert not report.llm_failures
     assert all(r.checked for r in _product(report))
+    assert report.passport.model.startswith("fake-1 → fake-lite")
+
+
+def test_trace_counts_calls_spent_before_provider_went_down(sample):
+    """Регрессия: после LLMUnavailable трасса писала calls=0, хотя запросы были сделаны."""
+
+    class Down(FakeLLM):
+        def _raw(self, system, user, schema):
+            raise LLMUnavailable("503")
+
+    report = orchestrator.run(sample, Down({}))
+    checker = next(t for t in report.trace if t.agent == "checker")
+    assert checker.calls == 1 and checker.models == {}
+
+
+def test_mixed_models_are_traceable_per_stage_and_requirement(sample):
+    """Переход посреди Checker: по трассе и checked_by видно, кто что проверил, без догадок."""
+
+    class BusyFromBatch3(FakeLLM):
+        def _raw(self, system, user, schema):
+            if self.model == "fake-1" and len(self.prompts) >= 2:
+                raise TransientError("503 high demand", final=LLMUnavailable, model_issue="перегружена (503)")
+            return super()._raw(system, user, schema)
+
+    llm = BusyFromBatch3({"LLMFacts": [GOOD_FACTS]})
+    llm.fallback_models = ["fake-lite"]
+    llm.retry_sleep = lambda s: None
+    report = orchestrator.run(sample, llm)
+    by = {}
+    for r in _product(report):
+        by.setdefault(r.checked_by, []).append(r.id)
+    assert by["fake-1"] == [f"R-{i:03d}" for i in range(1, 13)]  # две пачки до перехода
+    assert set(by) == {"fake-1", "fake-lite"}
+    steps = {t.agent: t.models for t in report.trace}
+    assert steps["checker"] == {"fake-1": 2, "fake-lite": 7}
+    assert steps["set_checker"] == {"fake-lite": 2} and steps["clarifier"] == {"fake-lite": 1}
     assert report.passport.model.startswith("fake-1 → fake-lite")
 
 

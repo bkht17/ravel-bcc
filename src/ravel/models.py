@@ -87,6 +87,7 @@ class Requirement(BaseModel):
     # True, только если LLM-проверка этого требования реально прошла. False — «не проверено»,
     # а не «нарушений нет»: отчёт и итог обязаны их различать.
     checked: bool = False
+    checked_by: str = ""  # модель, подтвердившая проверку (важно, если был переход на запасную)
     raw_text: str = ""  # исходный фрагмент без нормализации ("" — агент не заполнил)
     line_start: int | None = None
     line_end: int | None = None
@@ -259,6 +260,7 @@ class TraceStep(BaseModel):
     calls: int = 0  # обращений к LLM
     cache_hits: int = 0
     produced: int = 0  # сколько объектов вернул
+    models: dict[str, int] = Field(default_factory=dict)  # принятых ответов LLM по моделям
     note: str = ""
 
 
