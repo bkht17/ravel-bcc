@@ -69,8 +69,9 @@ class ClarifierAgent(Agent):
             ctx.llm_failures.append(f"{self.name}: вопросы составлены по шаблону ({e})")
             return None
         valid_f = {f.id for f in ctx.findings}
-        valid_r = {r.id for r in ctx.requirements}
-        block_of = {r.id: r.block_id for r in ctx.requirements}
+        product = [r for r in ctx.requirements if r.kind == "requirement"]
+        valid_r = {r.id for r in product}
+        block_of = {r.id: r.block_id for r in product}
         result = []
         for q in out.questions:
             prefer = [block_of[x] for x in q.requirement_ids if x in block_of]

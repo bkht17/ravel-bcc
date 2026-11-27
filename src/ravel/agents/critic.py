@@ -20,8 +20,11 @@ class CriticAgent(Agent):
     name = "critic"
 
     def run(self, ctx: RunContext) -> int:
-        block_of = {r.id: r.block_id for r in ctx.requirements}
-        rid_of = {r.block_id: r.id for r in ctx.requirements}
+        # находки привязываются только к продуктовым требованиям; цитата из примера или
+        # метаданных остаётся доказательством, но M-/E-ID в requirement_ids не попадает
+        product = [r for r in ctx.requirements if r.kind == "requirement"]
+        block_of = {r.id: r.block_id for r in product}
+        rid_of = {r.block_id: r.id for r in product}
         kept: list[Finding] = []
         for f in ctx.findings:
             ok = (
@@ -94,7 +97,8 @@ def _verify_llm(f: Finding, ctx: RunContext, block_of: dict[str, str], rid_of: d
 
     if f.criterion == Criterion.set_consistent and len({q.block_id for q in f.quotes}) < 2:
         return False  # противоречию нужны обе стороны
-    f.requirement_ids = sorted(set(claimed) | set(quoted))
+    # ranked — свойство документа целиком: цитата лишь пример, к требованиям не привязываем
+    f.requirement_ids = [] if f.criterion == Criterion.ranked else sorted(set(claimed) | set(quoted))
     return True
 
 

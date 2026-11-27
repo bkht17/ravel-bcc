@@ -228,10 +228,6 @@ QUOTE_OF = {
 }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ждёт B: фильтр по kind в агентах — находка с ID метаданных (M-) или примера (E-) попадает в report.findings",
-)
 @pytest.mark.parametrize("which", ["metadata", "example"])
 @pytest.mark.parametrize("schema", ["LLMFindings", "LLMSetFindings"])
 def test_findings_on_metadata_and_examples_are_not_counted(schema, which):
