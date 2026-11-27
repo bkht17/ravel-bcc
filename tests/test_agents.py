@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -32,10 +33,19 @@ class FakeLLM(LLMClient):
         queue = self.replies.get(schema.__name__, [])
         if queue:
             return queue.pop(0)
-        return json.dumps({next(iter(schema.model_fields)): []})
+        # исправная модель по умолчанию: дефектов нет, каждое требование пачки подтверждено
+        reply = {name: [] for name, f in schema.model_fields.items() if f.is_required()}
+        if "reviewed_ids" in reply:
+            reply["reviewed_ids"] = re.findall(r"^\[(R-\d+)\]", user, flags=re.M)
+        return json.dumps(reply)
 
     def users(self, schema_name: str) -> list[str]:
         return [u for s, u in self.prompts if s == schema_name]
+
+
+def _product(report):
+    """Продуктовые требования: метаданные и примеры Checker не оценивает."""
+    return [r for r in report.requirements if r.kind == "requirement"]
 
 
 def _finding(rid, quote, criterion="verifiable", severity="critical"):
@@ -52,8 +62,11 @@ def _finding(rid, quote, criterion="verifiable", severity="critical"):
     }
 
 
-def _findings(*items) -> str:
-    return json.dumps({"findings": list(items)})
+ALL_IDS = [f"R-{i:03d}" for i in range(1, 100)]  # Checker сам оставляет только ID своей пачки
+
+
+def _findings(*items, reviewed=ALL_IDS) -> str:
+    return json.dumps({"findings": list(items), "reviewed_ids": list(reviewed)})
 
 
 def _facts(*items) -> str:
@@ -139,10 +152,40 @@ def test_requirement_id_must_match_quote(sample):
 def test_checked_flags_follow_batches(sample):
     llm = FakeLLM({"LLMFindings": ["{bad", "{still bad"]})  # первая пачка падает
     report = orchestrator.run(sample, llm)
-    reqs = report.requirements
+    reqs = _product(report)
     assert not any(r.checked for r in reqs[:6])
     assert all(r.checked for r in reqs[6:])
     assert any("R-001–R-006 не проверены" in m for m in report.llm_failures)
+
+
+def test_empty_review_list_leaves_requirements_unchecked(sample):
+    """Аудит: пустой ответ модели помечал всю пачку проверенной. Теперь пропуски видны."""
+    llm = FakeLLM({"LLMFindings": [_findings(reviewed=[])] * 100})
+    report = orchestrator.run(sample, llm)
+    assert not any(r.checked for r in _product(report))
+    assert any("модель не подтвердила проверку R-001, R-002" in m for m in report.llm_failures)
+    assert report.verdict.status == "undecided"
+    batches = -(-len(_product(report)) // 6)
+    assert len(llm.users("LLMFindings")) == 2 * batches  # пачка и один повтор, не больше
+
+
+def test_missing_ids_are_rechecked_once(sample):
+    first = _findings(_finding("R-006", F2), reviewed=["R-001", "R-002"])  # R-006 — по находке
+    llm = FakeLLM({"LLMFindings": [first], "LLMFacts": [GOOD_FACTS]})  # дальше подтверждает всё
+    report = orchestrator.run(sample, llm)
+    assert all(r.checked for r in _product(report))
+    retry = llm.users("LLMFindings")[1]
+    assert "[R-003]" in retry and "[R-005]" in retry
+    assert "[R-001]" not in retry and "[R-006]" not in retry
+    assert not report.llm_failures
+
+
+def test_metadata_and_examples_are_not_sent_to_checker(sample):
+    llm = FakeLLM({})
+    report = orchestrator.run(sample, llm)
+    assert {r.kind for r in report.requirements} >= {"metadata", "example"}
+    sent = "\n".join(llm.users("LLMFindings"))
+    assert "[R-001]" in sent and "[M-" not in sent and "[E-" not in sent
 
 
 def test_requirement_criterion_rejected_for_set(sample):
@@ -252,7 +295,7 @@ def test_overloaded_primary_model_hands_over_to_fallback(sample):
     llm.retry_sleep = lambda s: None
     report = orchestrator.run(sample, llm)
     assert not report.llm_failures
-    assert all(r.checked for r in report.requirements)
+    assert all(r.checked for r in _product(report))
     assert report.passport.model.startswith("fake-1 → fake-lite")
 
 
@@ -305,7 +348,7 @@ def test_clarifier_failure_is_noncritical_checker_failure_is_not(sample):
     ok = orchestrator.run(sample, ClarifierDown({"LLMFacts": [GOOD_FACTS]}))
     assert any(m.startswith("clarifier") for m in ok.llm_failures)
     assert ok.questions  # вопросы по шаблону
-    assert all(r.checked for r in ok.requirements)
+    assert all(r.checked for r in _product(ok))
     assert ok.verdict.status != "undecided"
     assert "сбоев LLM" not in ok.verdict.headline
     assert "некритично" in render_markdown(ok)

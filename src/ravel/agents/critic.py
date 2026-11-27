@@ -20,8 +20,11 @@ class CriticAgent(Agent):
     name = "critic"
 
     def run(self, ctx: RunContext) -> int:
-        block_of = {r.id: r.block_id for r in ctx.requirements}
-        rid_of = {r.block_id: r.id for r in ctx.requirements}
+        # находки привязываются только к продуктовым требованиям; цитата из примера или
+        # метаданных остаётся доказательством, но M-/E-ID в requirement_ids не попадает
+        product = [r for r in ctx.requirements if r.kind == "requirement"]
+        block_of = {r.id: r.block_id for r in product}
+        rid_of = {r.block_id: r.id for r in product}
         kept: list[Finding] = []
         for f in ctx.findings:
             ok = (

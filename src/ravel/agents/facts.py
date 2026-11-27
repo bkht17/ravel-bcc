@@ -100,7 +100,7 @@ def extract_facts(ctx: RunContext, llm: LLMClient, agent_name: str) -> list[Fact
     """Факты по всем фрагментам. LLMUnavailable пробрасывается, прочие сбои — в llm_failures."""
     system = load("common") + "\n\n" + load("facts")
     topics = "\n".join(f"- {k} — {v}" for k, v in TOPICS.items())
-    by_block = {r.block_id: r.id for r in ctx.requirements}
+    by_block = {r.block_id: r.id for r in ctx.requirements if r.kind == "requirement"}
     parts = chunks(ctx.doc.markdown)
     facts: list[Fact] = []
     seen: set[tuple[str, str]] = set()
