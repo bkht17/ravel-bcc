@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 # --------------------------------------------------------------------------- документ
 
@@ -86,6 +86,10 @@ class Requirement(BaseModel):
     # True, только если LLM-проверка этого требования реально прошла. False — «не проверено»,
     # а не «нарушений нет»: отчёт и итог обязаны их различать.
     checked: bool = False
+    raw_text: str = ""  # исходный фрагмент без нормализации ("" — агент не заполнил)
+    line_start: int | None = None
+    line_end: int | None = None
+    kind: Literal["requirement", "metadata", "example"] = "requirement"
 
     @property
     def short(self) -> str:
@@ -258,9 +262,14 @@ class TraceStep(BaseModel):
 
 
 class Verdict(BaseModel):
-    ready: bool
+    status: Literal["ready", "not_ready", "undecided"]
     headline: str
     fix_first: list[str]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ready(self) -> bool:
+        return self.status == "ready"
 
 
 class Report(BaseModel):

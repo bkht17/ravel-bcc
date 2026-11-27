@@ -54,7 +54,7 @@ def run(
     if any(i.level == IssueLevel.fatal for i in doc.issues):
         report.fatal = True
         report.verdict = Verdict(
-            ready=False,
+            status="not_ready",
             headline="Документ не удалось прочитать, проверка не выполнена.",
             fix_first=[i.message for i in doc.issues if i.level == IssueLevel.fatal],
         )
@@ -129,15 +129,15 @@ def verdict(report: Report) -> Verdict:
             "Начинать разработку и тестирование по документу нельзя: критичных дефектов — "
             f"{len(crit)} (противоречия, непроверяемые или неполные требования)."
         )
-        return Verdict(ready=False, headline=headline, fix_first=fix_first)
+        return Verdict(status="not_ready", headline=headline, fix_first=fix_first)
     if major:
         return Verdict(
-            ready=False,
+            status="not_ready",
             headline=f"Документ требует доработки: существенных дефектов — {len(major)}.",
             fix_first=fix_first,
         )
     return Verdict(
-        ready=True,
+        status="ready",
         headline="Критичных и существенных дефектов не найдено; можно начинать.",
         fix_first=fix_first,
     )
