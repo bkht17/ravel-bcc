@@ -54,7 +54,7 @@ def run(
     if any(i.level == IssueLevel.fatal for i in doc.issues):
         report.fatal = True
         report.verdict = Verdict(
-            status="not_ready",
+            status="undecided",
             headline="Документ не удалось прочитать, проверка не выполнена.",
             fix_first=[i.message for i in doc.issues if i.level == IssueLevel.fatal],
         )
@@ -120,10 +120,59 @@ def run(
     return report
 
 
+# Предупреждения чтения, после которых текст не потерян: прогон можно считать полным.
+# Любой другой код предупреждения (в том числе новый) считается потерей текста.
+BENIGN_ISSUE_CODES = frozenset({"ext_mismatch", "non_utf8"})
+
+
+def llm_mode(report: Report) -> bool:
+    return report.passport.provider != "none"
+
+
+def coverage(report: Report) -> tuple[int, int]:
+    """(проверено, всего) по требованиям: «проверено» — только если LLM-проверка реально прошла."""
+    return sum(1 for r in report.requirements if r.checked), len(report.requirements)
+
+
+def undecided_reasons(report: Report) -> list[str]:
+    """Почему итог принять нельзя; пусто — проверка полная. Для нечитаемого документа — пусто:
+    причина уже в issues."""
+    if report.fatal:
+        return []
+    done, total = coverage(report)
+    reasons: list[str] = []
+    if not llm_mode(report):
+        reasons.append("проверка выполнена только правилами, без LLM")
+    if total == 0:
+        reasons.append("в документе не выделено ни одного требования")
+    elif llm_mode(report) and done < total:
+        reasons.append(f"не проверено LLM требований: {total - done}")
+    if report.llm_failures:
+        reasons.append(f"сбоев LLM в прогоне: {len(report.llm_failures)}")
+    lost = sorted(
+        {i.code for i in report.issues if i.level == IssueLevel.warning and i.code not in BENIGN_ISSUE_CODES}
+    )
+    if lost:
+        reasons.append(f"документ прочитан частично ({', '.join(lost)})")
+    return reasons
+
+
 def verdict(report: Report) -> Verdict:
     crit = [f for f in report.findings if f.severity == Severity.critical]
     major = [f for f in report.findings if f.severity == Severity.major]
     fix_first = [f"{f.id}: {f.title}" for f in (crit + major)[:5]]
+    reasons = undecided_reasons(report)
+    if reasons:
+        done, total = coverage(report)
+        extra = f" (и ещё причин: {len(reasons) - 1})" if len(reasons) > 1 else ""
+        return Verdict(
+            status="undecided",
+            headline=(
+                "Решение о начале разработки и тестирования принять нельзя: "
+                f"проверено {done} из {total} требований. Причина: {reasons[0]}{extra}."
+            ),
+            fix_first=fix_first,
+        )
     if crit:
         headline = (
             "Начинать разработку и тестирование по документу нельзя: критичных дефектов — "
@@ -144,10 +193,14 @@ def verdict(report: Report) -> Verdict:
 
 
 def exit_code(report: Report) -> int:
-    """0 — всё прочитано и проверено; 2 — частично; 1 — документ не прочитан."""
+    """0 — проверено полностью; 2 — частично или итог не определён; 1 — документ не прочитан.
+
+    3 (LLM недоступен до начала) выставляет CLI до запуска оркестратора.
+    """
     if report.fatal:
         return 1
-    if report.issues or report.llm_failures:
+    v = report.verdict or verdict(report)
+    if v.status == "undecided" or report.issues or report.llm_failures:
         return 2
     return 0
 

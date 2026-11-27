@@ -15,7 +15,7 @@ runner = CliRunner()
 def test_cli_without_llm(sample, tmp_path):
     out = tmp_path / "r.md"
     res = runner.invoke(app, ["check", str(sample), "-o", str(out), "-p", "none"])
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 2, res.output
     assert out.exists() and (tmp_path / "r.questions.yaml").exists()
 
 
@@ -43,7 +43,7 @@ def test_answers_roundtrip(sample, tmp_path):
     qfile.write_text(text, encoding="utf-8")
     out2 = tmp_path / "r2.md"
     res = runner.invoke(app, ["check", str(sample), "-o", str(out2), "-p", "none", "--answers", str(qfile)])
-    assert res.exit_code == 0
+    assert res.exit_code == 2
     assert "Ответ автора:** Используем POST" in out2.read_text(encoding="utf-8")
 
 
@@ -121,7 +121,7 @@ NAMES = ["r.md", "r.json", "r.questions.yaml", "r.trace.jsonl"]
 def test_failure_mid_group_keeps_old_files_and_no_tmpdir(sample, tmp_path, monkeypatch):
     from ravel import fsutil
 
-    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    assert _run(sample, tmp_path / "r.md").exit_code == 2
     before = _snapshot(tmp_path, NAMES)
 
     real, calls = fsutil._stage, []
@@ -146,11 +146,15 @@ def _run_ids(tmp_path):
 
     ids = {
         "json": json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["run_id"],
-        "trace": json.loads((tmp_path / "r.trace.jsonl").read_text(encoding="utf-8").splitlines()[0])["run_id"],
+        "trace": json.loads((tmp_path / "r.trace.jsonl").read_text(encoding="utf-8").splitlines()[0])[
+            "run_id"
+        ],
     }
     ids["yaml"] = (tmp_path / "r.questions.yaml").read_text(encoding="utf-8").splitlines()[0].split(": ")[1]
     row = next(
-        ln for ln in (tmp_path / "r.md").read_text(encoding="utf-8").splitlines() if ln.startswith("| ID прогона")
+        ln
+        for ln in (tmp_path / "r.md").read_text(encoding="utf-8").splitlines()
+        if ln.startswith("| ID прогона")
     )
     ids["md"] = row.split("`")[1]
     return ids
@@ -159,10 +163,10 @@ def _run_ids(tmp_path):
 def test_run_id_same_in_all_files_and_new_per_run(sample, tmp_path):
     from ravel.render import load_answers
 
-    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    assert _run(sample, tmp_path / "r.md").exit_code == 2
     first = _run_ids(tmp_path)
     assert len(set(first.values())) == 1
-    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    assert _run(sample, tmp_path / "r.md").exit_code == 2
     second = _run_ids(tmp_path)
     assert len(set(second.values())) == 1
     assert second["md"] != first["md"]
@@ -175,7 +179,7 @@ def test_paths_with_spaces_and_cyrillic(sample, tmp_path):
     src = d / "требования 1.md"
     src.write_bytes(sample.read_bytes())
     out = d / "отчёт 1.md"
-    assert _run(src, out).exit_code == 0
+    assert _run(src, out).exit_code == 2
     assert out.exists() and (d / "отчёт 1.trace.jsonl").exists()
     assert [p.name for p in d.iterdir() if p.name.startswith(".")] == []
 
@@ -183,7 +187,7 @@ def test_paths_with_spaces_and_cyrillic(sample, tmp_path):
 def test_missing_passport_row_writes_nothing(sample, tmp_path, monkeypatch):
     from ravel import render
 
-    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    assert _run(sample, tmp_path / "r.md").exit_code == 2
     before = _snapshot(tmp_path, NAMES)
 
     monkeypatch.setattr(render, "render_markdown", lambda report: "# Отчёт\n\n| Поле | Значение |\n")
@@ -221,3 +225,78 @@ def test_output_hardlink_to_input_rejected(sample, tmp_path):
     assert _sha(src) == before and _sha(link) == before
     assert os.path.samefile(src, link)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["link.md", "x.md"]
+
+
+# --- итог: undecided вместо ложного «можно начинать» -------------------------------------------
+
+READY_PHRASE = "можно начинать"
+
+
+def _use_llm(monkeypatch, llm):
+    monkeypatch.setattr("ravel.llm.get_client", lambda provider, model=None: llm)
+
+
+def _ok_facts():
+    from .test_agents import _facts
+
+    return _facts(
+        ("frequency_limits", "порог", "Пользователь задаёт порог от 1 000 до 10 000 тенге включительно")
+    )
+
+
+def test_provider_none_is_undecided_exit_2(sample, tmp_path):
+    out = tmp_path / "r.md"
+    res = _run(sample, out)
+    md = out.read_text(encoding="utf-8")
+    assert res.exit_code == 2
+    assert READY_PHRASE not in md
+    assert "принять нельзя" in md and "только правилами" in md
+    assert "Покрытие: проверено 0 из" in md
+
+
+def test_provider_always_fails_exit_2(sample, tmp_path, monkeypatch):
+    from ravel.llm.base import LLMUnavailable
+
+    from .test_agents import FakeLLM
+
+    class Down(FakeLLM):
+        def _raw(self, system, user, schema):
+            raise LLMUnavailable("403")
+
+    _use_llm(monkeypatch, Down({}))
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(sample), "-o", str(out), "-p", "gemini"])
+    md = out.read_text(encoding="utf-8")
+    assert res.exit_code == 2
+    assert READY_PHRASE not in md
+    assert "Не проверено (LLM недоступен или ответ отклонён)" in md
+    assert "Нарушений не найдено." not in md
+
+
+def test_document_without_requirements_exit_2(tmp_path, monkeypatch):
+    from .test_agents import FakeLLM
+
+    src = tmp_path / "empty.md"
+    src.write_text("# Только заголовок\n", encoding="utf-8")
+    _use_llm(monkeypatch, FakeLLM({}))
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(src), "-o", str(out), "-p", "gemini"])
+    md = out.read_text(encoding="utf-8")
+    assert res.exit_code == 2
+    assert READY_PHRASE not in md
+    assert "проверено 0 из 0 требований" in md
+
+
+def test_full_clean_run_exit_0(tmp_path, monkeypatch):
+    from .conftest import MINI_MD
+    from .test_agents import FakeLLM
+
+    src = tmp_path / "mini.md"
+    src.write_text(MINI_MD, encoding="utf-8")
+    _use_llm(monkeypatch, FakeLLM({"LLMFacts": [_ok_facts()]}))
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(src), "-o", str(out), "-p", "gemini"])
+    md = out.read_text(encoding="utf-8")
+    assert res.exit_code == 0, res.output
+    assert READY_PHRASE in md
+    assert "Покрытие: проверено 3 из 3 требований." in md

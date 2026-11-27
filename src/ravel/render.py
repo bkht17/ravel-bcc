@@ -16,6 +16,7 @@ from jinja2 import Environment, StrictUndefined
 
 from ravel.fsutil import atomic_write_group
 from ravel.models import CRITERION_LABELS, SEVERITY_LABELS, Question, Report, Severity
+from ravel.orchestrator import coverage, llm_mode, undecided_reasons
 
 
 def _cell(text: str | None, limit: int = 160) -> str:
@@ -43,8 +44,14 @@ def render_markdown(report: Report) -> str:
     crit_counter = Counter(f.criterion for f in report.findings)
     reqs_with_defects = len({rid for f in report.findings for rid in f.requirement_ids})
 
+    done, total = coverage(report)
     return template.render(
         r=report,
+        llm=llm_mode(report),
+        reasons=undecided_reasons(report),
+        checked_n=done,
+        total_n=total,
+        set_check_failed=any(m.startswith("set_checker") for m in report.llm_failures),
         p=report.passport,
         by_req=by_req,
         set_findings=set_findings,

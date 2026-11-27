@@ -13,9 +13,12 @@
 | Версия промптов | {{ p.prompt_version }} |
 | Критерии | ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3 |
 
-{% if r.issues or r.llm_failures or r.dropped_unverified %}
+{% if r.issues or r.llm_failures or r.dropped_unverified or reasons %}
 ## Ограничения прогона
 
+{% for m in reasons %}
+- **Итог не определён**: {{ m }}.
+{% endfor %}
 {% for i in r.issues %}
 - **{{ "Ошибка" if i.level == "fatal" else "Предупреждение" }}** ({{ i.code }}): {{ i.message }}{% if i.location %} — {{ i.location }}{% endif %}
 
@@ -66,7 +69,15 @@
   - Как исправить: {{ f.suggestion }}
 {% endif %}
 {% endfor %}
-{% else %}
+{% endif %}
+
+{% if not q.checked %}
+{% if llm %}
+**Не проверено (LLM недоступен или ответ отклонён).**
+{% elif not fs %}
+Нарушений по правилам не найдено; LLM-проверка отключена.
+{% endif %}
+{% elif not fs %}
 Нарушений не найдено.
 {% endif %}
 
@@ -87,6 +98,12 @@
 {% endif %}
 
 {% endfor %}
+{% elif not llm %}
+Проверка набора выполнялась только правилами (LLM отключён).
+
+{% elif set_check_failed %}
+Не проверено (LLM недоступен или ответ отклонён).
+
 {% else %}
 Нарушений на уровне набора не найдено.
 
@@ -147,6 +164,12 @@
 
 **{{ r.verdict.headline }}**
 
+Покрытие: проверено {{ checked_n }} из {{ total_n }} требований.
+
+{% if r.verdict.status == "undecided" and critical %}
+Уже найдено критичных: {{ critical | length }}.
+
+{% endif %}
 {% if r.verdict.fix_first %}
 Исправить в первую очередь:
 
