@@ -11,6 +11,9 @@
 | Провайдер / модель | {{ p.provider }} / {{ p.model }} |
 | Версия агента | {{ p.agent_version }} |
 | Версия промптов | {{ p.prompt_version }} |
+{% if run_id %}
+| ID прогона | `{{ run_id }}` |
+{% endif %}
 | Критерии | ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3 |
 
 {% if r.issues or r.llm_failures or r.dropped_unverified or reasons %}
@@ -24,7 +27,11 @@
 
 {% endfor %}
 {% for m in r.llm_failures %}
+{% if m in noncritical %}
+- **LLM (некритично, на итог не влияет)**: {{ m }}
+{% else %}
 - **LLM**: {{ m }}
+{% endif %}
 {% endfor %}
 {% if r.dropped_unverified %}
 - Отброшено находок без подтверждённой цитаты: {{ r.dropped_unverified }} (цитата не найдена в тексте документа).
@@ -58,7 +65,10 @@
 > {{ q.text | cell(600) }}
 
 {% set fs = by_req.get(q.id, []) %}
+{% set sfs = set_by_req.get(q.id, []) %}
 {% if fs %}
+**Находки по требованию:**
+
 {% for f in fs %}
 - **{{ f.id }} · {{ SL[f.severity] }} · {{ CL[f.criterion] }}** — {{ f.title }}
   {{ f.explanation }}
@@ -70,14 +80,21 @@
 {% endif %}
 {% endfor %}
 {% endif %}
+{% if sfs %}
+**Затрагивающие находки уровня набора:**
 
+{% for f in sfs %}
+- {{ f.id }} · {{ SL[f.severity] }} · {{ f.title }} (см. раздел 4, {{ f.id }})
+{% endfor %}
+
+{% endif %}
 {% if not q.checked %}
 {% if llm %}
 **Не проверено (LLM недоступен или ответ отклонён).**
-{% elif not fs %}
+{% elif not fs and not sfs %}
 Нарушений по правилам не найдено; LLM-проверка отключена.
 {% endif %}
-{% elif not fs %}
+{% elif not fs and not sfs %}
 Нарушений не найдено.
 {% endif %}
 
@@ -111,7 +128,7 @@
 ## 5. Уточняющие вопросы к автору
 
 {% if r.questions %}
-Без ответов на эти вопросы разработка и тестирование будут опираться на догадки. Файл для ответов: `*.questions.yaml`; повторный прогон с `--answers` учитывает ответы.
+Файл для ответов: `*.questions.yaml`; повторный прогон с `--answers` учитывает ответы.
 
 {% for q in r.questions %}
 **{{ q.id }} · {{ SL[q.priority] }}.** {{ q.question }}

@@ -16,7 +16,7 @@ from jinja2 import Environment, StrictUndefined
 
 from ravel.fsutil import atomic_write_group
 from ravel.models import CRITERION_LABELS, SEVERITY_LABELS, Question, Report, Severity
-from ravel.orchestrator import coverage, llm_mode, undecided_reasons
+from ravel.orchestrator import coverage, llm_mode, noncritical_failures, undecided_reasons
 
 
 def _cell(text: str | None, limit: int = 160) -> str:
@@ -24,7 +24,7 @@ def _cell(text: str | None, limit: int = 160) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def render_markdown(report: Report) -> str:
+def render_markdown(report: Report, run_id: str | None = None) -> str:
     env = Environment(
         trim_blocks=True,
         lstrip_blocks=True,
@@ -40,6 +40,11 @@ def render_markdown(report: Report) -> str:
             for rid in f.requirement_ids:
                 by_req.setdefault(rid, []).append(f)
     set_findings = [f for f in report.findings if f.scope == "set"]
+    # находки уровня набора, затрагивающие требование (ссылка на раздел 4)
+    set_by_req: dict[str, list] = {}
+    for f in set_findings:
+        for rid in f.requirement_ids:
+            set_by_req.setdefault(rid, []).append(f)
     sev = Counter(f.severity for f in report.findings)
     crit_counter = Counter(f.criterion for f in report.findings)
     reqs_with_defects = len({rid for f in report.findings for rid in f.requirement_ids})
@@ -54,6 +59,9 @@ def render_markdown(report: Report) -> str:
         set_check_failed=any(m.startswith("set_checker") for m in report.llm_failures),
         p=report.passport,
         by_req=by_req,
+        set_by_req=set_by_req,
+        run_id=run_id,
+        noncritical=noncritical_failures(report),
         set_findings=set_findings,
         critical=[f for f in report.findings if f.severity == Severity.critical],
         sev={s: sev.get(s, 0) for s in Severity},
@@ -74,36 +82,27 @@ def output_paths(out_md: Path) -> dict[str, Path]:
     }
 
 
-_PASSPORT_ANCHOR = "| Версия промптов |"
-
-
 class ReportRenderError(RuntimeError):
     """Отчёт не удалось собрать; на диск ничего не записано."""
 
 
-def _with_run_id_row(md: str, run_id: str) -> str:
-    """Вставить строку «ID прогона» в паспорт (после «Версия промптов»), не трогая шаблон.
+def _check_run_id_row(md: str, run_id: str) -> None:
+    """Строка «ID прогона» рисуется шаблоном; если её нет в паспорте — файлы не пишем.
 
-    Если строки паспорта нет — ReportRenderError: иначе run_id молча пропал бы из MD,
-    оставшись в JSON/YAML/trace.
+    Иначе run_id молча пропал бы из MD, оставшись в JSON/YAML/trace.
     """
-    lines = md.splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        if line.startswith(_PASSPORT_ANCHOR):
-            if not line.endswith("\n"):
-                lines[i] = line + "\n"
-            lines.insert(i + 1, f"| ID прогона | `{run_id}` |\n")
-            return "".join(lines)
-    raise ReportRenderError(
-        "в паспорте отчёта нет строки «Версия промптов» — некуда вставить «ID прогона»; файлы не записаны"
-    )
+    if f"| ID прогона | `{run_id}` |" not in md:
+        raise ReportRenderError(
+            "в паспорте отчёта нет строки «ID прогона» (после «Версия промптов»); файлы не записаны"
+        )
 
 
 def write_outputs(report: Report, out_md: Path, run_id: str | None = None) -> dict[str, Path]:
     run_id = run_id or str(uuid.uuid4())
     paths = output_paths(out_md)
     # Все четыре содержимых собираем до записи: любая ошибка здесь не трогает целевую папку.
-    md = _with_run_id_row(render_markdown(report), run_id)
+    md = render_markdown(report, run_id)
+    _check_run_id_row(md, run_id)
     data = {"run_id": run_id, **json.loads(report.model_dump_json())}
     trace = json.dumps({"run_id": run_id}) + "\n" + "".join(s.model_dump_json() + "\n" for s in report.trace)
     contents = {
@@ -118,8 +117,7 @@ def write_outputs(report: Report, out_md: Path, run_id: str | None = None) -> di
 
 def questions_yaml(questions: list[Question], run_id: str | None = None) -> str:
     header = (
-        (f"# run_id: {run_id}\n" if run_id else "")
-        + "# Уточняющие вопросы к автору требований.\n"
+        (f"# run_id: {run_id}\n" if run_id else "") + "# Уточняющие вопросы к автору требований.\n"
         "# Впишите ответы в поле answer и запустите проверку снова с --answers <этот файл>.\n"
     )
     data = [

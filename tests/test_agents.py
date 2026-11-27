@@ -290,3 +290,31 @@ def test_clarifier_template_without_llm(sample, severity):
     report = orchestrator.run(sample, llm=None)
     assert report.questions
     assert all(q.id.startswith("Q-") and q.why for q in report.questions)
+
+
+def test_clarifier_failure_is_noncritical_checker_failure_is_not(sample):
+    from ravel.models import Report  # noqa: F401
+    from ravel.render import render_markdown
+
+    class ClarifierDown(FakeLLM):
+        def _raw(self, system, user, schema):
+            if schema.__name__ == "LLMQuestions":
+                raise LLMUnavailable("503")
+            return super()._raw(system, user, schema)
+
+    ok = orchestrator.run(sample, ClarifierDown({"LLMFacts": [GOOD_FACTS]}))
+    assert any(m.startswith("clarifier") for m in ok.llm_failures)
+    assert ok.questions  # вопросы по шаблону
+    assert all(r.checked for r in ok.requirements)
+    assert ok.verdict.status != "undecided"
+    assert "сбоев LLM" not in ok.verdict.headline
+    assert "некритично" in render_markdown(ok)
+
+    class CheckerDown(FakeLLM):
+        def _raw(self, system, user, schema):
+            if schema.__name__ == "LLMFindings":
+                raise LLMUnavailable("503")
+            return super()._raw(system, user, schema)
+
+    bad = orchestrator.run(sample, CheckerDown({"LLMFacts": [GOOD_FACTS]}))
+    assert bad.verdict.status == "undecided"

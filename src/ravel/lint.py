@@ -51,17 +51,32 @@ _PLACEHOLDER = re.compile(
 )
 
 
+def _unfilled_checklist_rows(doc: DocumentIR) -> dict[tuple[str, ...], list[Block]]:
+    """Строки чек-листов с невыбранным «Да / Нет», по разделам."""
+    by_section: dict[tuple[str, ...], list[Block]] = defaultdict(list)
+    for b in doc.blocks:
+        if b.kind == BlockKind.table_row and re.search(r"да\s*/\s*нет", b.text, re.IGNORECASE):
+            by_section[tuple(b.section)].append(b)
+    return by_section
+
+
 def placeholders(doc: DocumentIR) -> list[Finding]:
+    # Заглушка в разделе с незаполненным чек-листом описана одной находкой — checklist_unfilled.
+    checklists = _unfilled_checklist_rows(doc)
     out = []
     for b in doc.blocks:
         if b.kind in (BlockKind.paragraph, BlockKind.list_item) and _PLACEHOLDER.search(b.text):
+            if tuple(b.section) in checklists:
+                continue
+            name = b.section[-1] if b.section else "—"
             out.append(
                 _f(
                     "placeholder",
                     Criterion.set_complete,
                     Severity.major,
-                    f"Раздел «{b.section[-1] if b.section else '—'}» не заполнен",
-                    "Вместо содержания стоит заглушка; по разделу нельзя ни разрабатывать, ни тестировать.",
+                    f"Раздел «{name}» не заполнен",
+                    f"В разделе «{name}» вместо содержания стоит заглушка «{b.text}»"
+                    + (f" (строка {b.line})." if b.line else "."),
                     [b.text],
                     "Заполнить раздел или явно указать, что он не требуется и почему.",
                 )
@@ -91,25 +106,41 @@ def empty_sections(doc: DocumentIR) -> list[Finding]:
     return out
 
 
+def _rows_word(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "строки"
+    return "строк"
+
+
 def unfilled_checklists(doc: DocumentIR) -> list[Finding]:
-    by_section: dict[tuple[str, ...], list[Block]] = defaultdict(list)
-    for b in doc.blocks:
-        if b.kind == BlockKind.table_row and re.search(r"да\s*/\s*нет", b.text, re.IGNORECASE):
-            by_section[tuple(b.section)].append(b)
     out = []
-    for section, rows in by_section.items():
+    for section, rows in _unfilled_checklist_rows(doc).items():
+        name = section[-1] if section else "—"
+        n = len(rows)
+        quotes = [rows[0].cells[0] if rows[0].cells else rows[0].text]
+        note = ""
+        for b in doc_blocks_in(doc, section):
+            if b.kind in (BlockKind.paragraph, BlockKind.list_item) and _PLACEHOLDER.search(b.text):
+                quotes.insert(0, b.text)
+                note = f" В том же разделе стоит пометка: «{b.text}»"
+                break
         out.append(
             _f(
                 "checklist_unfilled",
                 Criterion.set_validatable,
                 Severity.major,
-                f"Чек-лист «{section[-1] if section else '—'}» не заполнен",
-                f"В {len(rows)} строках остались варианты «Да / Нет» без выбранного ответа: ревью требований не проведено.",
-                [rows[0].cells[0] if rows[0].cells else rows[0].text],
-                "Провести ревью и проставить отметки до передачи в разработку.",
+                f"Чек-лист «{name}» не заполнен",
+                f"Отметки в чек-листе не проставлены ни в одной из {n} {_rows_word(n)}: "
+                f"во всех остались варианты «Да / Нет» без выбранного ответа.{note}{'.' if note else ''}",
+                quotes,
+                "Проставить отметки в чек-листе (или указать, что ревью не требуется) до передачи в разработку.",
             )
         )
     return out
+
+
+def doc_blocks_in(doc: DocumentIR, section: tuple[str, ...]) -> list[Block]:
+    return [b for b in doc.blocks if tuple(b.section) == section]
 
 
 def empty_tables(doc: DocumentIR) -> list[Finding]:

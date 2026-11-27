@@ -134,6 +134,15 @@ def coverage(report: Report) -> tuple[int, int]:
     return sum(1 for r in report.requirements if r.checked), len(report.requirements)
 
 
+# Сбой этих агентов не лишает итог опоры: их работу заменяет шаблон (вопросы к автору).
+# Сбои checker и set_checker — обратное: требования остаются непроверенными.
+NONCRITICAL_AGENTS = ("clarifier",)
+
+
+def noncritical_failures(report: Report) -> list[str]:
+    return [m for m in report.llm_failures if m.startswith(NONCRITICAL_AGENTS)]
+
+
 def undecided_reasons(report: Report) -> list[str]:
     """Почему итог принять нельзя; пусто — проверка полная. Для нечитаемого документа — пусто:
     причина уже в issues."""
@@ -147,8 +156,9 @@ def undecided_reasons(report: Report) -> list[str]:
         reasons.append("в документе не выделено ни одного требования")
     elif llm_mode(report) and done < total:
         reasons.append(f"не проверено LLM требований: {total - done}")
-    if report.llm_failures:
-        reasons.append(f"сбоев LLM в прогоне: {len(report.llm_failures)}")
+    critical_failures = len(report.llm_failures) - len(noncritical_failures(report))
+    if critical_failures:
+        reasons.append(f"сбоев LLM в прогоне: {critical_failures}")
     lost = sorted(
         {i.code for i in report.issues if i.level == IssueLevel.warning and i.code not in BENIGN_ISSUE_CODES}
     )
@@ -175,8 +185,7 @@ def verdict(report: Report) -> Verdict:
         )
     if crit:
         headline = (
-            "Начинать разработку и тестирование по документу нельзя: критичных дефектов — "
-            f"{len(crit)} (противоречия, непроверяемые или неполные требования)."
+            f"Начинать разработку и тестирование по документу нельзя: критичных дефектов — {len(crit)}."
         )
         return Verdict(status="not_ready", headline=headline, fix_first=fix_first)
     if major:

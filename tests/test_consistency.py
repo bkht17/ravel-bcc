@@ -161,3 +161,143 @@ def test_ready_flag_is_computed_and_dumped():
 
     v = Verdict(status="undecided", headline="h", fix_first=[])
     assert v.ready is False and v.model_dump()["ready"] is False
+
+
+# --------------------------------------------------------------------------- карточки и находки набора
+
+
+def _synthetic_report(**kw):
+    from datetime import datetime
+
+    from ravel.models import Criterion, Finding, Passport, Quote, Report, Requirement, Severity, Verdict
+
+    reqs = [
+        Requirement(id=f"R-{i}", block_id=f"B-{i}", text=f"Требование {i}", location="строка 1", checked=True)
+        for i in (1, 2, 3)
+    ]
+    set_f = Finding(
+        id="F-001",
+        scope="set",
+        criterion=Criterion.set_consistent,
+        severity=Severity.critical,
+        title="Противоречие порогов",
+        explanation="Пороги в R-1 и R-2 различаются.",
+        quotes=[Quote(text="Требование 1", location="строка 1")],
+        requirement_ids=["R-1"],
+        source="test",
+    )
+    own_f = Finding(
+        id="F-002",
+        scope="requirement",
+        criterion=Criterion.unambiguous,
+        severity=Severity.minor,
+        title="Размыто",
+        explanation="e",
+        quotes=[Quote(text="Требование 2", location="строка 2")],
+        requirement_ids=["R-2"],
+        source="test",
+    )
+    passport = Passport(
+        document_title="T",
+        source_name="t.md",
+        source_sha256="0" * 64,
+        started_at=datetime.now().astimezone(),
+        provider="fake",
+        model="m",
+        agent_version="v",
+        prompt_version="p",
+    )
+    return Report(
+        passport=passport,
+        requirements=reqs,
+        findings=[set_f, own_f],
+        verdict=Verdict(status="not_ready", headline="h", fix_first=[]),
+        **kw,
+    )
+
+
+def _card(md: str, rid: str) -> str:
+    return md.split(f"### {rid}\n")[1].split("### ")[0].split("## 4.")[0]
+
+
+def test_set_finding_appears_in_requirement_card():
+    md = render_markdown(_synthetic_report())
+    card = _card(md, "R-1")
+    assert "Нарушений не найдено" not in card
+    assert "Затрагивающие находки уровня набора" in card
+    assert "F-001" in card and "Критично" in card and "Противоречие порогов" in card
+    assert "раздел 4" in card
+    assert "Нарушений не найдено" not in _card(md, "R-2")  # своя находка
+    assert "Нарушений не найдено." in _card(md, "R-3")  # проверено, находок нет
+
+
+def test_summary_counts_requirements_touched_by_set_findings():
+    report = _synthetic_report()
+    md = render_markdown(report)
+    # вручную: R-1 (набор) и R-2 (своя) затронуты, R-3 нет
+    touched = {rid for f in json.loads(report.model_dump_json())["findings"] for rid in f["requirement_ids"]}
+    assert touched == {"R-1", "R-2"}
+    assert "| Требований с нарушениями | 2 |" in md
+
+
+def test_unchecked_texts_kept_next_to_set_findings():
+    report = _synthetic_report()
+    report.requirements[0].checked = False
+    md = render_markdown(report)
+    card = _card(md, "R-1")
+    assert "Не проверено (LLM недоступен или ответ отклонён)." in card
+    assert "Затрагивающие находки уровня набора" in card
+
+
+def test_run_id_rendered_by_template():
+    md = render_markdown(_synthetic_report(), "abc-123")
+    assert "| Версия промптов | p |\n| ID прогона | `abc-123` |\n" in md
+    assert "ID прогона" not in render_markdown(_synthetic_report())
+
+
+def test_checklist_texts_do_not_claim_review_not_done(sample):
+    report = orchestrator.run(sample, llm=None)
+    md = render_markdown(report)
+    assert "не проведено" not in md
+    checklist = [f for f in report.findings if f.source == "lint:checklist_unfilled"]
+    assert (
+        checklist and "Отметки в чек-листе не проставлены ни в одной из 14 строк" in checklist[0].explanation
+    )
+    # пустой раздел ревью и пустой чек-лист в нём — одна находка, а не две
+    assert not [
+        f for f in report.findings if f.source == "lint:placeholder" and "Ревью требований" in f.title
+    ]
+    assert len(checklist[0].quotes) == 2
+
+
+FORBIDDEN_PHRASES = [
+    "догадки",
+    "опираться на догад",
+    "нельзя ни разрабатывать, ни тестировать",
+    "ревью требований не проведено",
+    "не проведено",
+    "противоречия, непроверяемые или неполные требования",
+]
+
+
+def test_report_linter_on_sample(sample, tmp_path):
+    """Каждая находка в MD имеет цитату со строкой; общих фраз без привязки к тексту нет."""
+    import re
+
+    from typer.testing import CliRunner
+
+    from ravel.cli import app
+
+    out = tmp_path / "r.md"
+    CliRunner().invoke(app, ["check", str(sample), "-o", str(out), "--provider", "none"])
+    md = out.read_text(encoding="utf-8")
+    for phrase in FORBIDDEN_PHRASES:
+        assert phrase not in md, phrase
+    findings = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))["findings"]
+    assert findings
+    # блок находки: от «F-NNN ·» до следующей находки/заголовка
+    parts = re.split(r"(?m)^(?:### |- \*\*)(?=F-\d{3} ·)", md)[1:]
+    by_id = {p[:5]: p for p in parts}
+    for f in findings:
+        block = by_id[f["id"]]
+        assert re.search(r"Цитата: «.+» \(.*строка \d+\)", block), f["id"]

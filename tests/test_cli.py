@@ -190,7 +190,9 @@ def test_missing_passport_row_writes_nothing(sample, tmp_path, monkeypatch):
     assert _run(sample, tmp_path / "r.md").exit_code == 2
     before = _snapshot(tmp_path, NAMES)
 
-    monkeypatch.setattr(render, "render_markdown", lambda report: "# Отчёт\n\n| Поле | Значение |\n")
+    monkeypatch.setattr(
+        render, "render_markdown", lambda report, run_id=None: "# Отчёт\n\n| Поле | Значение |\n"
+    )
     res = _run(sample, tmp_path / "r.md")
     assert res.exit_code == 1
     assert "Версия промптов" in res.output and "не записан" in res.output
@@ -203,7 +205,7 @@ def test_write_outputs_missing_passport_row_raises_before_mkdir(tmp_path, monkey
     from ravel import render
     from ravel.models import Report
 
-    monkeypatch.setattr(render, "render_markdown", lambda report: "без паспорта\n")
+    monkeypatch.setattr(render, "render_markdown", lambda report, run_id=None: "без паспорта\n")
     out = tmp_path / "new" / "r.md"
     with pytest.raises(render.ReportRenderError, match="Версия промптов"):
         render.write_outputs(Report.model_construct(questions=[], trace=[]), out, "rid")
