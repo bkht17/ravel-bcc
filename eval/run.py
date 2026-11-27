@@ -1,4 +1,4 @@
-"""Прогон оценки одной командой: агент на трёх документах, затем оценка каждого отчёта.
+"""Прогон оценки одной командой: агент на всех документах eval, затем оценка каждого отчёта.
 
     uv run python eval/run.py              # без LLM (--provider none)
     uv run python eval/run.py -p gemini    # с LLM; ответы кэшируются в .cache/llm
@@ -25,6 +25,8 @@ CASES: dict[str, tuple[Path, Path]] = {
     "requirements": (ROOT / "samples" / "requirements.md", EVAL_DIR / "golden.yaml"),
     "library": (EVAL_DIR / "foreign" / "library.md", EVAL_DIR / "foreign" / "library.golden.yaml"),
     "timer": (EVAL_DIR / "foreign" / "timer.md", EVAL_DIR / "foreign" / "timer.golden.yaml"),
+    "rooms": (EVAL_DIR / "foreign" / "rooms.md", EVAL_DIR / "foreign" / "rooms.golden.yaml"),
+    "converter": (EVAL_DIR / "foreign" / "converter.md", EVAL_DIR / "foreign" / "converter.golden.yaml"),
 }
 # коды ravel check: 0 — всё проверено, 2 — частично (есть ограничения прогона), 1 — документ не прочитан
 OK_CODES = {0, 1, 2}
