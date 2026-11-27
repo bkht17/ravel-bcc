@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 from pathlib import Path
 
 import pymupdf
@@ -145,7 +146,8 @@ SAMPLE_REQS = 49
 def test_md_sample_requirement_count_unchanged(sample):
     reqs = segment(load_document(sample))
     assert sum(r.kind == "requirement" for r in reqs) == SAMPLE_REQS
-    assert sum(r.kind == "metadata" for r in reqs) == 5
+    # 5 служебных строк из «Часть B» + 7 строк таблицы «Общие сведения» (раньше пропускались)
+    assert sum(r.kind == "metadata" for r in reqs) == 12
     assert sum(r.kind == "example" for r in reqs) == 6
 
 
@@ -161,7 +163,8 @@ def test_printed_pdf_is_not_silently_lost(sample):
 
 def test_tables_pdf_not_worse():
     doc = load_document(FIXTURES / "requirements_tables.pdf")
-    n = len(segment(doc))
+    # baseline — число именно требований; строки «Общие сведения» теперь метаданные и не в счёте
+    n = sum(r.kind == "requirement" for r in segment(doc))
     assert abs(n - TABLES_PDF_BASELINE) <= 0.1 * TABLES_PDF_BASELINE
     assert "low_coverage" not in codes(doc)
 
@@ -241,10 +244,12 @@ def test_passport_table_is_metadata_not_requirements(tmp_path):
         "| **Author** | Школа |\n| **Developer** | Команда |\n| **Gitlab project** | Учебный |\n\n"
         "### Цель\nСервис должен уведомлять клиента о достижении порога.\n",
     )
-    assert [r.kind for r in reqs] == ["metadata"] * 3 + ["requirement"]
+    # порядок выдачи: требования, затем метаданные; ID по видам раздельные
+    assert [r.kind for r in reqs] == ["requirement"] + ["metadata"] * 3
+    assert [r.id for r in reqs] == ["R-001", "M-001", "M-002", "M-003"]
     assert [r.section[-1] for r in reqs if r.kind == "requirement"] == ["Цель"]  # из паспорта — ни одного
-    assert reqs[0].raw_text == "| **Author** | Школа |"
-    assert (reqs[0].line_start, reqs[0].line_end) == (9, 9)
+    assert reqs[1].raw_text == "| **Author** | Школа |"
+    assert (reqs[1].line_start, reqs[1].line_end) == (9, 9)
 
 
 def test_numbered_lists_keep_numbers_in_source_id(tmp_path):
@@ -348,3 +353,33 @@ def test_sample_expected_classes(sample):
     assert at(136).text == "Path-параметры: Не используются."
     nums = [r.source_id for r in reqs if r.source_id and " п. " in r.source_id]
     assert len(nums) == 8 and len(set(nums)) == 8
+
+
+def test_sample_ids_are_separate_series_without_gaps(sample):
+    reqs = segment(load_document(sample))
+    for kind, prefix in (("requirement", "R"), ("metadata", "M"), ("example", "E")):
+        ids = [r.id for r in reqs if r.kind == kind]
+        assert ids, kind
+        assert ids == [f"{prefix}-{i:03d}" for i in range(1, len(ids) + 1)], kind
+    assert len({r.id for r in reqs}) == len(reqs)
+    assert sum(r.id.startswith("R-") for r in reqs) == sum(r.kind == "requirement" for r in reqs)
+
+
+def test_general_info_rows_are_metadata_not_skipped(sample):
+    reqs = segment(load_document(sample))
+    meta = [r.text for r in reqs if r.kind == "metadata"]
+    for field in (
+        "Наименование задачи",
+        "Продукт",
+        "Бизнес-процесс",
+        "Тип работы",
+        "Влияние на ИС",
+        "Задача в JIRA",
+    ):
+        assert any(field in t for t in meta), field
+    assert not any(r.kind == "requirement" and "Общие сведения" in r.section for r in reqs)
+    # прочие служебные разделы остаются пропущенными
+    assert not any(
+        re.search(r"ревью требований|согласующ|согласован|история изменений", " ".join(r.section), re.I)
+        for r in reqs
+    )

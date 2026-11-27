@@ -15,10 +15,15 @@ ID_RE = re.compile(r"^([A-Za-zА-ЯЁа-яё]{1,6}-\d+(?:\.\d+)*)[.:)]?\s+")
 
 # Разделы-служебки: не требования, а чек-листы и подписи (их проверяют линтеры)
 _SKIP_SECTIONS = re.compile(
-    r"ревью требований|блок согласующ|лист согласован|история изменений|тестирование требований"
-    r"|общие сведения",
+    r"ревью требований|блок согласующ|лист согласован|история изменений|тестирование требований",
     re.IGNORECASE,
 )
+
+# «Общие сведения» не пропускаются: строки таблицы паспорта попадают в отчёт как метаданные
+_GENERAL_INFO = re.compile(r"общие сведения", re.IGNORECASE)
+
+# Префиксы собственных идентификаторов по видам: нумерация в каждой группе своя, подряд
+ID_PREFIX = {"requirement": "R", "metadata": "M", "example": "E"}
 
 _CANDIDATES = {BlockKind.paragraph, BlockKind.list_item, BlockKind.table_row, BlockKind.code}
 
@@ -137,6 +142,7 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
     structured = any(len(b.section) >= 2 for b in doc.blocks)
     lines = doc.markdown.split("\n")
     seen_ids: set[str] = set()
+    counters = dict.fromkeys(ID_PREFIX, 0)
     for block in doc.blocks:
         size = _chars(block.text)
         total += size
@@ -151,7 +157,14 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
             if block.kind == BlockKind.code:
                 covered += size
             continue
-        if any(_SKIP_SECTIONS.search(s) for s in block.section):
+        general_row = (
+            block.kind == BlockKind.table_row
+            and any(_GENERAL_INFO.search(s) for s in block.section)
+            and sum(1 for c in block.cells or [] if c.strip()) >= 1
+        )
+        if not general_row and any(
+            _SKIP_SECTIONS.search(s) or _GENERAL_INFO.search(s) for s in block.section
+        ):
             covered += size
             continue
         if block.kind == BlockKind.table_row and not any(c.strip() for c in block.cells or []):
@@ -188,15 +201,16 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
                     continue
                 text = f"{parent}: {block.text}"
             if block.kind == BlockKind.table_row:
-                if is_metadata_row(block):
+                if general_row or is_metadata_row(block):
                     kind = "metadata"
                 if block.header:
                     text = "; ".join(
                         f"{h}: {c}" for h, c in zip(block.header, block.cells or [], strict=False) if c
                     )
+        counters[kind] += 1
         reqs.append(
             Requirement(
-                id=f"R-{len(reqs) + 1:03d}",
+                id=f"{ID_PREFIX[kind]}-{counters[kind]:03d}",
                 source_id=source_id,
                 block_id=block.id,
                 text=text,
@@ -209,5 +223,8 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
             )
         )
         covered += size
+    # Порядок выдачи: сначала требования, затем метаданные и примеры (внутри группы — порядок
+    # документа). Так ID совпадают с порядком списка, а пачки проверки начинаются с требований.
+    reqs.sort(key=lambda r: list(ID_PREFIX).index(r.kind))
     products = sum(1 for r in reqs if r.kind == "requirement")
     return reqs, Coverage(products, covered, total)

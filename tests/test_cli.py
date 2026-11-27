@@ -400,3 +400,14 @@ def test_ocr_low_quality_is_fatal_exit_1(tmp_path):
     res = runner.invoke(app, ["check", str(scan), "-o", str(out), "--provider", "none"])
     assert res.exit_code == 1
     assert "ocr_low_quality" in out.read_text(encoding="utf-8")
+
+
+def test_cli_counts_are_split_by_kind(sample, tmp_path):
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(sample), "-o", str(out), "-p", "none"])
+    assert "Требований: 49 (метаданных: 12, примеров: 6)," in res.output
+    md = out.read_text(encoding="utf-8")
+    assert "| Требований выделено | 49 |" in md
+    assert "| Метаданных документа | 12 |" in md
+    assert "| Примеров | 6 |" in md
+    assert "| E-001 | пример |" in md and "| M-001 | метаданные |" in md

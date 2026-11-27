@@ -16,14 +16,16 @@
 {% endif %}
 | Критерии | ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3 |
 
-{% if r.issues or r.llm_failures or r.dropped_unverified or reasons %}
+{% set notes = r.issues | selectattr("level", "equalto", "info") | list %}
+{% set limits = r.issues | rejectattr("level", "equalto", "info") | list %}
+{% if limits or r.llm_failures or r.dropped_unverified or reasons %}
 ## Ограничения прогона
 
 {% for m in reasons %}
 - **Итог не определён**: {{ m }}.
 {% endfor %}
-{% for i in r.issues %}
-- **{{ "Ошибка" if i.level == "fatal" else "Информация" if i.level == "info" else "Предупреждение" }}** ({{ i.code }}): {{ i.message }}{% if i.location %} — {{ i.location }}{% endif %}
+{% for i in limits %}
+- **{{ "Ошибка" if i.level == "fatal" else "Предупреждение" }}** ({{ i.code }}): {{ i.message }}{% if i.location %} — {{ i.location }}{% endif %}
 
 {% endfor %}
 {% for m in r.llm_failures %}
@@ -36,6 +38,15 @@
 {% if r.dropped_unverified %}
 - Отброшено находок без подтверждённой цитаты: {{ r.dropped_unverified }} (цитата не найдена в тексте документа).
 {% endif %}
+
+{% endif %}
+{% if notes %}
+## Сведения о чтении документа
+
+{% for i in notes %}
+- {{ i.message }} ({{ i.code }}){% if i.location %} — {{ i.location }}{% endif %}
+
+{% endfor %}
 
 {% endif %}
 {% if r.fatal %}
@@ -62,7 +73,7 @@
 {% if extra %}
 ### Метаданные и примеры (найдены, требованиями не считаются)
 
-Метаданные — атрибуты документа (автор, проект, версия); примеры — блоки кода с образцами ответов. В проверку отдельных требований они не входят и в счёт «проверено X из Y» не попадают.
+Метаданные — атрибуты документа (общие сведения, автор, проект, версия); примеры — блоки кода с образцами ответов. В проверку отдельных требований они не входят и в счёт «проверено X из Y» не попадают.
 
 | В отчёте | Тип | Место | Текст |
 | :--- | :--- | :--- | :--- |
@@ -170,7 +181,9 @@
 
 | Показатель | Значение |
 | :--- | ---: |
-| Требований выделено | {{ r.requirements | length }} |
+| Требований выделено | {{ prod | length }} |
+| Метаданных документа | {{ r.requirements | selectattr("kind", "equalto", "metadata") | list | length }} |
+| Примеров | {{ r.requirements | selectattr("kind", "equalto", "example") | list | length }} |
 | Требований с нарушениями | {{ reqs_with_defects }} |
 | Нарушений всего | {{ r.findings | length }} |
 | Критичных | {{ sev["critical"] }} |

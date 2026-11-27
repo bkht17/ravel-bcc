@@ -327,3 +327,21 @@ def test_coverage_counts_only_product_requirements(sample):
     md = render_markdown(report)
     assert "Метаданные и примеры" in md
     assert "Информация" not in md  # нормальное покрытие: пометок info в этом прогоне нет
+
+
+def test_info_issue_alone_is_not_a_run_limit(tmp_path):
+    from ravel.models import IngestIssue, IssueLevel
+
+    from .test_agents import FakeLLM
+
+    report = orchestrator.run(_mini(tmp_path), FakeLLM({"LLMFacts": [_facts_ok()]}))
+    assert report.verdict.status == "ready"
+    report.issues = [
+        IngestIssue(level=IssueLevel.info, code="fallback_segmentation", message="резервная нарезка")
+    ]
+    md = render_markdown(report)
+    assert "## Ограничения прогона" not in md
+    assert "## Сведения о чтении документа" in md and "резервная нарезка" in md
+    report.issues = [IngestIssue(level=IssueLevel.warning, code="low_coverage", message="мало")]
+    md = render_markdown(report)
+    assert "## Ограничения прогона" in md and "## Сведения о чтении документа" not in md

@@ -116,8 +116,11 @@ def check(
         raise typer.Exit(1) from e
     code = orchestrator.exit_code(report)
     color = {0: typer.colors.GREEN, 2: typer.colors.YELLOW}.get(code, typer.colors.RED)
+    n_req = sum(r.kind == "requirement" for r in report.requirements)
+    n_meta = sum(r.kind == "metadata" for r in report.requirements)
+    n_ex = sum(r.kind == "example" for r in report.requirements)
     typer.secho(
-        f"\nТребований: {len(report.requirements)}, нарушений: {len(report.findings)}, "
+        f"\nТребований: {n_req} (метаданных: {n_meta}, примеров: {n_ex}), нарушений: {len(report.findings)}, "
         f"вопросов: {len(report.questions)}",
         err=True,
     )
