@@ -119,8 +119,9 @@ def test_second_batch_fails_gives_partial_coverage(sample):
             return super()._raw(system, user, schema)
 
     report = orchestrator.run(sample, DiesOnSecond({}))
-    total = len(report.requirements)
-    done = sum(r.checked for r in report.requirements)
+    products = [r for r in report.requirements if r.kind == "requirement"]
+    total = len(products)
+    done = sum(r.checked for r in products)
     assert 0 < done < total
     assert report.verdict.status == "undecided"
     assert orchestrator.exit_code(report) == 2
@@ -309,3 +310,20 @@ def test_report_linter_on_sample(sample, tmp_path):
     for f in findings:
         block = by_id[f["id"]]
         assert re.search(r"Цитата: «.+» \(.*строка \d+\)", block), f["id"]
+
+
+def test_coverage_counts_only_product_requirements(sample):
+    report = orchestrator.run(sample, llm=None)
+    kinds = {r.kind for r in report.requirements}
+    assert kinds == {"requirement", "metadata", "example"}
+    products = [r for r in report.requirements if r.kind == "requirement"]
+    assert orchestrator.coverage(report) == (0, len(products))
+    # LLM проверила все продуктовые требования, метаданные и примеры остались непроверенными
+    for r in products:
+        r.checked = True
+    report.passport.provider = "gemini"
+    assert orchestrator.coverage(report) == (len(products), len(products))
+    assert not any("не проверено LLM" in m for m in orchestrator.undecided_reasons(report))
+    md = render_markdown(report)
+    assert "Метаданные и примеры" in md
+    assert "Информация" not in md  # нормальное покрытие: пометок info в этом прогоне нет

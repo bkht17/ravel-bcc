@@ -196,19 +196,16 @@ def _low_coverage_issue(cov: Coverage) -> IngestIssue:
 def _note_fallback(issues: list[IngestIssue]) -> None:
     """Информационная пометка: резервная нарезка сработала и покрытие нормальное.
 
-    В IssueLevel нет уровня info (models.py не менялся), а warning сделал бы итог undecided.
-    Пока уровня нет, пометка не добавляется; появится сама, когда IssueLevel.info будет добавлен.
+    Уровень info не входит в причины undecided (там только warning), поэтому прогон остаётся полным.
     """
-    info = getattr(IssueLevel, "info", None)
-    if info is not None:
-        issues.append(
-            IngestIssue(
-                level=info,
-                code="fallback_segmentation",
-                message="Структура документа не распознана; требования выделены по общим признакам "
-                "(идентификаторы, нумерация, маркеры, абзацы).",
-            )
+    issues.append(
+        IngestIssue(
+            level=IssueLevel.info,
+            code="fallback_segmentation",
+            message="Структура документа не распознана; требования выделены по общим признакам "
+            "(идентификаторы, нумерация, маркеры, абзацы).",
         )
+    )
 
 
 def _decode(data: bytes, issues: list[IngestIssue]) -> str | None:

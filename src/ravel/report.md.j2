@@ -23,7 +23,7 @@
 - **Итог не определён**: {{ m }}.
 {% endfor %}
 {% for i in r.issues %}
-- **{{ "Ошибка" if i.level == "fatal" else "Предупреждение" }}** ({{ i.code }}): {{ i.message }}{% if i.location %} — {{ i.location }}{% endif %}
+- **{{ "Ошибка" if i.level == "fatal" else "Информация" if i.level == "info" else "Предупреждение" }}** ({{ i.code }}): {{ i.message }}{% if i.location %} — {{ i.location }}{% endif %}
 
 {% endfor %}
 {% for m in r.llm_failures %}
@@ -49,17 +49,31 @@
 {% else %}
 ## 2. Как агент нарезал требования
 
-Всего выделено требований: **{{ r.requirements | length }}**. Если в документе не было номера, в колонке «В документе» стоит «—», а требование идентифицируется цитатой и местом.
+{% set prod = r.requirements | selectattr("kind", "equalto", "requirement") | list %}
+{% set extra = r.requirements | rejectattr("kind", "equalto", "requirement") | list %}
+Всего выделено требований: **{{ prod | length }}**. Если в документе не было номера, в колонке «В документе» стоит «—», а требование идентифицируется цитатой и местом.
 
 | В отчёте | В документе | Место | Формулировка |
 | :--- | :--- | :--- | :--- |
-{% for q in r.requirements %}
+{% for q in prod %}
 | {{ q.id }} | {{ q.source_id or "—" }} | {{ q.location | cell(90) }} | {{ q.text | cell }} |
 {% endfor %}
 
+{% if extra %}
+### Метаданные и примеры (найдены, требованиями не считаются)
+
+Метаданные — атрибуты документа (автор, проект, версия); примеры — блоки кода с образцами ответов. В проверку отдельных требований они не входят и в счёт «проверено X из Y» не попадают.
+
+| В отчёте | Тип | Место | Текст |
+| :--- | :--- | :--- | :--- |
+{% for q in extra %}
+| {{ q.id }} | {{ "метаданные" if q.kind == "metadata" else "пример" }} | {{ q.location | cell(90) }} | {{ q.text | cell }} |
+{% endfor %}
+
+{% endif %}
 ## 3. Проверка каждого требования
 
-{% for q in r.requirements %}
+{% for q in prod %}
 ### {{ q.id }}{% if q.source_id %} ({{ q.source_id }}){% endif %}
 
 > {{ q.text | cell(600) }}

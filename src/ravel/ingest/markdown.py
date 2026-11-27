@@ -16,6 +16,14 @@ _LIST = re.compile(r"^(\s*)(?:[-*+•]|\d+[.)])\s+(.*)$")
 _TABLE_SEP = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _HR = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
 _INLINE = re.compile(r"(\*\*|__|`)")
+# Строка начинается с маркера статуса или кода ответа: «**400.**», «404 —», «HTTP 500».
+_STATUS_MARKER = re.compile(
+    r"^\s*(?:\*\*[1-5]\d{2}\.?\*\*|[1-5]\d{2}\s*[—–]|[1-5]\d{2}\s+-\s|HTTP\s+[1-5]\d{2}\b)"
+)
+
+
+def is_status_marker(line: str) -> bool:
+    return bool(_STATUS_MARKER.match(line))
 
 
 def normalize_text(text: str) -> str:
@@ -78,7 +86,13 @@ def parse_markdown(md: str, page_of_line: dict[int, int] | None = None) -> tuple
     def flush_para() -> None:
         nonlocal para
         if para:
-            add(BlockKind.paragraph, strip_inline(" ".join(p.strip() for p in para)), para_start)
+            # несколько строк с маркером статуса — отдельные утверждения: делим по этим строкам
+            marks = [k for k, p in enumerate(para) if is_status_marker(p)]
+            cuts = [0]
+            if len(marks) >= 2:
+                cuts = ([0] if marks[0] != 0 else []) + marks
+            for a, b in zip(cuts, [*cuts[1:], len(para)], strict=True):
+                add(BlockKind.paragraph, strip_inline(" ".join(p.strip() for p in para[a:b])), para_start + a)
             para = []
 
     while i < len(lines):

@@ -143,7 +143,10 @@ SAMPLE_REQS = 49
 
 
 def test_md_sample_requirement_count_unchanged(sample):
-    assert len(segment(load_document(sample))) == SAMPLE_REQS
+    reqs = segment(load_document(sample))
+    assert sum(r.kind == "requirement" for r in reqs) == SAMPLE_REQS
+    assert sum(r.kind == "metadata" for r in reqs) == 5
+    assert sum(r.kind == "example" for r in reqs) == 6
 
 
 def test_printed_pdf_is_not_silently_lost(sample):
@@ -220,3 +223,128 @@ def test_pdf_locations_have_page_numbers():
     reqs = segment(doc)
     assert reqs and all("стр. " in r.location for r in reqs)
     assert {r.location.rsplit("стр. ", 1)[1] for r in reqs} >= {"1", "4"}
+
+
+# --------------------------------------------------------------------------- нарезка: классы и строки
+
+
+def _segment_text(tmp_path, md: str):
+    p = tmp_path / "doc.md"
+    p.write_text(md, encoding="utf-8")
+    return segment(load_document(p))
+
+
+def test_passport_table_is_metadata_not_requirements(tmp_path):
+    reqs = _segment_text(
+        tmp_path,
+        "# Док\n\n## Часть B\n\n### Общие параметры\n\n| Поле | Значение |\n| :--- | :--- |\n"
+        "| **Author** | Школа |\n| **Developer** | Команда |\n| **Gitlab project** | Учебный |\n\n"
+        "### Цель\nСервис должен уведомлять клиента о достижении порога.\n",
+    )
+    assert [r.kind for r in reqs] == ["metadata"] * 3 + ["requirement"]
+    assert [r.section[-1] for r in reqs if r.kind == "requirement"] == ["Цель"]  # из паспорта — ни одного
+    assert reqs[0].raw_text == "| **Author** | Школа |"
+    assert (reqs[0].line_start, reqs[0].line_end) == (9, 9)
+
+
+def test_numbered_lists_keep_numbers_in_source_id(tmp_path):
+    reqs = _segment_text(
+        tmp_path,
+        "# Док\n\n## A\n\n### Логика\n1. Проверить сессию клиента.\n2. Проверить карту клиента.\n\n"
+        "### Правила\n1. Целое число тенге.\n2. Границы включены.\n",
+    )
+    ids = [r.source_id for r in reqs]
+    assert ids == ["Логика п. 1", "Логика п. 2", "Правила п. 1", "Правила п. 2"]
+    assert len(set(ids)) == len(ids)
+
+
+def test_status_lines_in_one_paragraph_split_into_requirements(tmp_path):
+    reqs = _segment_text(
+        tmp_path,
+        "# Док\n\n## A\n\n### Статусы\n"
+        "**400.** Ответ, если параметры неверны.  \n"
+        "**401.** Ответ, если нет авторизации.  \n"
+        "**403.** Ответ, если доступ запрещён.\n",
+    )
+    assert len(reqs) == 3
+    assert [(r.line_start, r.line_end) for r in reqs] == [(6, 6), (7, 7), (8, 8)]
+    assert reqs[1].text.startswith("401.")
+    assert reqs[1].raw_text.startswith("**401.**")
+
+
+def test_json_block_is_one_example_with_lines(tmp_path):
+    reqs = _segment_text(
+        tmp_path,
+        '# Док\n\n## A\n\n#### 400. Bad request\n```json\n{"message": "x"}\n```\n',
+    )
+    assert len(reqs) == 1
+    ex = reqs[0]
+    assert ex.kind == "example"
+    assert (ex.line_start, ex.line_end) == (6, 8)
+    assert ex.raw_text == '```json\n{"message": "x"}\n```'
+    assert ex.text.startswith("400. Bad request:") and '"message"' in ex.text
+
+
+def test_schema_block_is_requirement(tmp_path):
+    reqs = _segment_text(
+        tmp_path, "# Док\n\n## A\n\n### Схема\n```text\nПриложение → Сервис → приложение.\n```\n"
+    )
+    assert [r.kind for r in reqs] == ["requirement"]
+    assert reqs[0].text == "Схема: Приложение → Сервис → приложение."
+
+
+def test_short_statement_under_heading_is_kept(tmp_path):
+    reqs = _segment_text(
+        tmp_path, "# Док\n\n## A\n\n#### Path-параметры\nНе используются.\n\n```json\n{}\n```\nили\n"
+    )
+    short = [r for r in reqs if r.kind == "requirement"]
+    assert [r.text for r in short] == ["Path-параметры: Не используются."]
+    assert short[0].raw_text == "Не используются."
+    assert short[0].line_start == 6
+
+
+def test_table_row_keeps_raw_text(tmp_path):
+    reqs = _segment_text(
+        tmp_path,
+        "# Док\n\n## A\n\n### Критерии\n| Условие | Результат |\n| --- | --- |\n| Порог 5 | Один push |\n",
+    )
+    assert reqs[0].text == "Условие: Порог 5; Результат: Один push"
+    assert reqs[0].raw_text == "| Порог 5 | Один push |"
+
+
+def test_info_issue_is_not_an_undecided_reason(sample):
+    from ravel.models import IngestIssue
+    from ravel.orchestrator import run, undecided_reasons
+
+    report = run(sample, None)
+    report.issues = [IngestIssue(level=IssueLevel.info, code="fallback_segmentation", message="x")]
+    assert not any("прочитан частично" in r for r in undecided_reasons(report))
+
+
+def test_sample_raw_text_is_verbatim_for_every_requirement(sample):
+    from ravel.ingest.markdown import normalize_text
+
+    lines = normalize_text(sample.read_text(encoding="utf-8")).split("\n")
+    reqs = segment(load_document(sample))
+    for r in reqs:
+        assert r.raw_text and r.line_start and r.line_end, r
+        assert "\n".join(lines[r.line_start - 1 : r.line_end]).count(r.raw_text) >= 1, r
+
+
+def test_sample_expected_classes(sample):
+    reqs = segment(load_document(sample))
+
+    def at(line: int):
+        return next(r for r in reqs if r.line_start == line)
+
+    for line in (110, 111, 112, 113, 114):  # Swagger, Gitlab project, Framework, Author, Developer
+        assert at(line).kind == "metadata"
+    assert at(103).kind == "requirement"  # Description остаётся описанием метода
+    assert at(129).kind == "requirement" and at(129).text.startswith("Схема:")
+    for start in (166, 170, 179, 184, 191, 196):
+        assert at(start).kind == "example"
+    for line in (162, 163, 174, 175, 176):  # статусы 200, 400, 401, 403, 500 — по отдельному требованию
+        assert at(line).kind == "requirement" and at(line).raw_text.startswith("**")
+    assert at(136).text == "Path-параметры: Не используются."
+    nums = [r.source_id for r in reqs if r.source_id and " п. " in r.source_id]
+    assert len(nums) == 8 and len(set(nums)) == 8

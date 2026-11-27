@@ -49,6 +49,7 @@ class Block(BaseModel):
 
 
 class IssueLevel(StrEnum):
+    info = "info"  # справка: чтение полное, на итог не влияет
     warning = "warning"  # прочитали частично, прогон продолжается
     fatal = "fatal"  # прочитать нельзя, отчёт содержит только причину
 

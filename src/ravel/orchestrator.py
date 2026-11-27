@@ -130,8 +130,12 @@ def llm_mode(report: Report) -> bool:
 
 
 def coverage(report: Report) -> tuple[int, int]:
-    """(проверено, всего) по требованиям: «проверено» — только если LLM-проверка реально прошла."""
-    return sum(1 for r in report.requirements if r.checked), len(report.requirements)
+    """(проверено, всего) по продуктовым требованиям (kind == "requirement").
+
+    «Проверено» — только если LLM-проверка реально прошла. Метаданные и примеры в счёт не входят:
+    LLM их как требования не проверяет."""
+    reqs = [r for r in report.requirements if r.kind == "requirement"]
+    return sum(1 for r in reqs if r.checked), len(reqs)
 
 
 # Сбой этих агентов не лишает итог опоры: их работу заменяет шаблон (вопросы к автору).
