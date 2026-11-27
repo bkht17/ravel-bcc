@@ -1,6 +1,9 @@
 """Нарезка документа на отдельные требования (детерминированно, по правилам).
 
-TODO(B): LLM-доразбиение составных абзацев на единичные требования.
+Абзац с несколькими утверждениями уже разделён при чтении (ingest/sentences.py): каждое
+утверждение — свой блок и своё требование, с номером пункта, родительским абзацем, номером
+фрагмента и строкой. Служебная ссылка на другой документ — метаданные, команда-пример (curl) —
+пример: оба остаются в отчёте и доступны проверке набора, но не проверяются как требования.
 """
 
 from __future__ import annotations
@@ -49,6 +52,22 @@ _PASSPORT_SECTIONS = re.compile(r"паспорт|общие|сведени|passp
 _MIN_WORD = re.compile(r"[A-Za-zА-ЯЁа-яё]{4,}")
 _ARROWS = ("→", "->", "⇒")
 _LIST_NUM = re.compile(r"^\s*(\d+)[.)]\s+")
+
+# Служебная ссылка на другой документ: «Родительский документ: «Название».», «См. …».
+# Только подпись (слово «документ», перед ним не больше одного определения, после — до трёх слов)
+# и название в кавычках, без утверждения о системе: «Приложение читает настройки через документ
+# «…»» и «Сервис хранит документ клиента: «…»» — требования.
+_DOC_NOUN = r"(?:документ\w*|спецификаци\w*|регламент\w*|document\w*|specification\w*)"
+_DOC_ADJ = r"(?:\w+(?:ый|ий|ой|ая|яя|ое|ее|ые|ие)|parent|child|related|source|main|base)"
+_TITLE = r"[«\"“][^»\"”]+[»\"”]"
+_REFERENCE = re.compile(
+    rf"^(?:(?:см\.|смотри|see|ссылка на)\s.+|(?:{_DOC_ADJ}\s+)?{_DOC_NOUN}(?:\s+\S+){{0,3}}?\s*[:—–-]\s*"
+    rf"{_TITLE}(?:\s*[,;]\s*{_TITLE})*)\s*\.?$",
+    re.IGNORECASE,
+)
+# Команда-пример: вызов сетевой утилиты из командной строки
+_COMMAND = re.compile(r"^\s*(?:\$\s+)?(?:curl|wget|grpcurl)\s+\S", re.IGNORECASE)
+_EXAMPLE_FIELD = re.compile(r"^(?:curl|wget|пример\w*|example\w*|sample\w*)$", re.IGNORECASE)
 _LIST_ANY = re.compile(r"^(\s*)(?:[-*+•]|\d+[.)])\s+")
 _FENCE_LANG = re.compile(r"^\s*`{3,}\s*([\w+-]*)")
 
@@ -106,6 +125,8 @@ def _span(lines: list[str], block: Block) -> tuple[int, int]:
     n = len(lines)
     if start > n:
         return start, start
+    if block.line_end:  # фрагмент абзаца: строки известны точно
+        return start, min(block.line_end, n)
     if block.kind in (BlockKind.heading, BlockKind.table_row):
         return start, start
     if block.kind == BlockKind.code:
@@ -136,6 +157,21 @@ def _short(block: Block) -> bool:
     return len(block.text.split()) <= 3
 
 
+def context_kind(block: Block) -> str | None:
+    """«metadata» для служебной ссылки на документ, «example» для команды-примера, иначе None."""
+    if block.kind == BlockKind.table_row:
+        cells = [c.strip() for c in block.cells or []]
+        if cells and _EXAMPLE_FIELD.match(cells[0]) or any(_COMMAND.match(c) for c in cells):
+            return "example"
+        return None
+    if block.kind in (BlockKind.paragraph, BlockKind.list_item):
+        if _COMMAND.match(block.text):
+            return "example"
+        if _REFERENCE.match(block.text):
+            return "metadata"
+    return None
+
+
 def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
     reqs: list[Requirement] = []
     covered = total = 0
@@ -143,6 +179,7 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
     lines = doc.markdown.split("\n")
     seen_ids: set[str] = set()
     counters = dict.fromkeys(ID_PREFIX, 0)
+    group_ids: dict[str, str | None] = {}  # parent_id блока → номер пункта в документе
     for block in doc.blocks:
         size = _chars(block.text)
         total += size
@@ -182,7 +219,9 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
             body = " ".join(x.strip() for x in block.text.split("\n") if x.strip())
             text = f"{parent}: {body}" if parent else body
         else:
-            if m := ID_RE.match(block.text):
+            if block.parent_id and block.parent_id in group_ids:
+                source_id = group_ids[block.parent_id]  # следующий фрагмент того же пункта
+            elif m := ID_RE.match(block.parent_text or block.text):
                 source_id = m.group(1)
             elif block.kind == BlockKind.list_item and (
                 n := _LIST_NUM.match(lines[start - 1] if raw else "")
@@ -194,12 +233,14 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
                         k += 1
                     source_id = f"{source_id} ({k})"
                 seen_ids.add(source_id)
-            elif block.kind != BlockKind.table_row and _short(block):
+            elif block.kind != BlockKind.table_row and not block.parent_id and _short(block):
                 # «Не используются.» — содержательно только рядом с заголовком-родителем;
                 # одинокие «или», «Да.», «404» не требование
                 if not parent or not _MIN_WORD.search(block.text):
                     continue
                 text = f"{parent}: {block.text}"
+            if block.parent_id:
+                group_ids.setdefault(block.parent_id, source_id)
             if block.kind == BlockKind.table_row:
                 if general_row or is_metadata_row(block):
                     kind = "metadata"
@@ -207,6 +248,8 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
                     text = "; ".join(
                         f"{h}: {c}" for h, c in zip(block.header, block.cells or [], strict=False) if c
                     )
+            if kind == "requirement":
+                kind = context_kind(block) or kind
         counters[kind] += 1
         reqs.append(
             Requirement(
@@ -220,11 +263,21 @@ def _walk(doc: DocumentIR) -> tuple[list[Requirement], Coverage]:
                 line_start=start if block.line else None,
                 line_end=end if block.line else None,
                 kind=kind,  # type: ignore[arg-type]
+                parent_id=block.parent_id,  # пока id блока; ниже заменяется на ID требования
+                parent_text=block.parent_text,
+                part=block.part,
+                parts=block.parts,
+                offset=block.offset,
             )
         )
         covered += size
     # Порядок выдачи: сначала требования, затем метаданные и примеры (внутри группы — порядок
     # документа). Так ID совпадают с порядком списка, а пачки проверки начинаются с требований.
     reqs.sort(key=lambda r: list(ID_PREFIX).index(r.kind))
+    # родитель фрагмента — ID требования, выделенного из первого фрагмента того же абзаца
+    by_block = {r.block_id: r.id for r in reqs}
+    for r in reqs:
+        if r.parent_id:
+            r.parent_id = by_block.get(r.parent_id)
     products = sum(1 for r in reqs if r.kind == "requirement")
     return reqs, Coverage(products, covered, total)

@@ -35,6 +35,14 @@ class Block(BaseModel):
     page: int | None = None  # страница PDF (1-based), если известна
     cells: list[str] | None = None  # для table_row: ячейки
     header: list[str] | None = None  # для table_row: заголовок таблицы
+    # Фрагмент абзаца или пункта списка, в котором несколько независимо проверяемых утверждений
+    # (ingest/sentences.py). У цельного блока все поля ниже — None.
+    line_end: int | None = None  # последняя строка фрагмента в нормализованном markdown
+    parent_id: str | None = None  # id первого фрагмента того же абзаца (адрес родителя)
+    parent_text: str | None = None  # полный текст абзаца/пункта, из которого выделен фрагмент
+    part: int | None = None  # номер фрагмента в абзаце, с 1
+    parts: int | None = None  # сколько фрагментов выделено из абзаца
+    offset: int | None = None  # parent_text[offset : offset + len(text)] == text
 
     @property
     def location(self) -> str:
@@ -91,6 +99,13 @@ class Requirement(BaseModel):
     line_start: int | None = None
     line_end: int | None = None
     kind: Literal["requirement", "metadata", "example"] = "requirement"
+    # Требование — фрагмент абзаца/пункта с несколькими утверждениями (см. Block). source_id у всех
+    # фрагментов один — номер пункта в документе. У цельного требования поля ниже — None.
+    parent_id: str | None = None  # ID (R-/M-/E-) первого фрагмента того же абзаца
+    parent_text: str | None = None  # полный текст исходного абзаца/пункта
+    part: int | None = None  # номер фрагмента, с 1
+    parts: int | None = None  # всего фрагментов в абзаце
+    offset: int | None = None  # parent_text[offset : offset + len(text)] == text
 
     @property
     def short(self) -> str:

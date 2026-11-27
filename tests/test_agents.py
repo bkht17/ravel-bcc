@@ -13,6 +13,7 @@ from ravel.ingest import load_document
 from ravel.llm.base import LLMClient, LLMUnavailable, TransientError
 from ravel.models import Question
 from ravel.quotes import locate
+from ravel.segment import segment
 
 F2 = "Месяц определяется по дате совершения покупки в Алматы"
 F3 = "На карту приходится максимум один такой push"
@@ -63,6 +64,27 @@ def _finding(rid, quote, criterion="verifiable", severity="critical"):
 
 
 ALL_IDS = [f"R-{i:03d}" for i in range(1, 100)]  # Checker сам оставляет только ID своей пачки
+BATCH = 6  # размер пачки CheckerAgent по умолчанию
+
+
+def _product_ids(sample) -> list[str]:
+    return [r.id for r in segment(load_document(sample)) if r.kind == "requirement"]
+
+
+def _rid(sample, quote: str) -> str:
+    """ID продуктового требования, в тексте которого стоит цитата (номера не зашиты в тест)."""
+    return next(r.id for r in segment(load_document(sample)) if r.kind == "requirement" and quote in r.text)
+
+
+def _batch_mates(sample, rid: str) -> list[str]:
+    ids = _product_ids(sample)
+    k = ids.index(rid) // BATCH
+    return ids[k * BATCH : (k + 1) * BATCH]
+
+
+def _before(sample, rid: str) -> list[str]:
+    """Ответы «дефектов нет» для пачек до пачки с rid: FakeLLM отвечает пачкам по очереди."""
+    return [_findings()] * (_product_ids(sample).index(rid) // BATCH)
 
 
 def _findings(*items, reviewed=ALL_IDS) -> str:
@@ -120,9 +142,10 @@ def test_quote_keeps_word_boundaries(sample):
 
 
 def test_hallucinated_quotes_are_dropped(sample):
-    good = _finding("R-006", F2)
-    bad = _finding("R-006", "Порог хранится в долларах США")
-    llm = FakeLLM({"LLMFindings": [_findings(good, bad)]})
+    r2 = _rid(sample, F2)
+    good = _finding(r2, F2)
+    bad = _finding(r2, "Порог хранится в долларах США")
+    llm = FakeLLM({"LLMFindings": _before(sample, r2) + [_findings(good, bad)]})
     report = orchestrator.run(sample, llm)
     llm_findings = [f for f in report.findings if f.source == "llm:checker"]
     assert len(llm_findings) == 1
@@ -130,8 +153,9 @@ def test_hallucinated_quotes_are_dropped(sample):
 
 
 def test_one_bad_quote_drops_whole_finding(sample):
-    mixed = _finding("R-006", [F2, "Порог хранится в долларах США"])
-    llm = FakeLLM({"LLMFindings": [_findings(mixed)]})
+    r2 = _rid(sample, F2)
+    mixed = _finding(r2, [F2, "Порог хранится в долларах США"])
+    llm = FakeLLM({"LLMFindings": _before(sample, r2) + [_findings(mixed)]})
     report = orchestrator.run(sample, llm)
     assert not [f for f in report.findings if f.source == "llm:checker"]
     assert report.dropped_unverified == 1
@@ -139,13 +163,17 @@ def test_one_bad_quote_drops_whole_finding(sample):
 
 def test_requirement_id_must_match_quote(sample):
     """ID из другой пачки отбрасывается; ID, в тексте которого нет цитаты, не засчитывается."""
-    other_batch = _finding("R-040", F2)  # R-040 не в первой пачке
-    wrong_place = _finding("R-005", F2)  # в пачке, но цитата из R-006
-    right = _finding(["R-005", "R-006"], F2, criterion="unambiguous")
-    llm = FakeLLM({"LLMFindings": [_findings(other_batch, wrong_place, right)]})
+    r2 = _rid(sample, F2)
+    mates = _batch_mates(sample, r2)
+    neighbour = next(r for r in mates if r != r2)
+    outsider = next(r for r in reversed(_product_ids(sample)) if r not in mates)
+    other_batch = _finding(outsider, F2)  # не из пачки с цитатой
+    wrong_place = _finding(neighbour, F2)  # в пачке, но цитата из r2
+    right = _finding([neighbour, r2], F2, criterion="unambiguous")
+    llm = FakeLLM({"LLMFindings": _before(sample, r2) + [_findings(other_batch, wrong_place, right)]})
     report = orchestrator.run(sample, llm)
     llm_findings = [f for f in report.findings if f.source == "llm:checker"]
-    assert [f.requirement_ids for f in llm_findings] == [["R-006"]]
+    assert [f.requirement_ids for f in llm_findings] == [[r2]]
     assert report.dropped_unverified == 2  # other_batch и wrong_place
 
 
@@ -198,13 +226,14 @@ def test_requirement_criterion_rejected_for_set(sample):
 
 
 def test_contradiction_needs_both_sides(sample):
-    one_side = _finding(["R-007", "R-008"], [F3], criterion="set_consistent")
-    both = _finding(["R-007", "R-008"], [F3, F4], criterion="set_consistent", severity="major")
+    r3, r4 = _rid(sample, F3), _rid(sample, F4)
+    one_side = _finding([r3, r4], [F3], criterion="set_consistent")
+    both = _finding([r3, r4], [F3, F4], criterion="set_consistent", severity="major")
     llm = FakeLLM({"LLMFacts": [GOOD_FACTS], "LLMSetFindings": [_findings(one_side, both)]})
     report = orchestrator.run(sample, llm)
     kept = [f for f in report.findings if f.source == "llm:set"]
     assert len(kept) == 1 and len(kept[0].quotes) == 2
-    assert kept[0].requirement_ids == ["R-007", "R-008"]
+    assert kept[0].requirement_ids == [r3, r4]
     assert report.dropped_unverified == 1
 
 
@@ -273,11 +302,13 @@ def test_cache_makes_second_run_free(sample, tmp_path):
 
 
 def test_invalid_json_is_repaired_once(sample):
-    ok = _findings(_finding("R-006", F2))
-    llm = FakeLLM({"LLMFindings": ["{not json", ok]})
+    r2 = _rid(sample, F2)
+    ok = _findings(_finding(r2, F2))
+    before = _before(sample, r2)
+    llm = FakeLLM({"LLMFindings": before + ["{not json", ok]})
     report = orchestrator.run(sample, llm)
     assert any(f.source == "llm:checker" for f in report.findings)
-    assert "не прошёл проверку схемы" in llm.users("LLMFindings")[1]
+    assert "не прошёл проверку схемы" in llm.users("LLMFindings")[len(before) + 1]
 
 
 def test_provider_down_falls_back_to_rules(sample):
@@ -324,18 +355,24 @@ def test_answers_reach_llm_prompts(sample):
 
 
 def test_clarifier_drops_unquoted_questions(sample):
-    finding = _findings(_finding("R-006", F2, criterion="unambiguous"))
+    r2 = _rid(sample, F2)
+    finding = _findings(_finding(r2, F2, criterion="unambiguous"))
     q_bad = {
         "question": "Какой порог?",
         "why": "w",
         "options": [],
         "finding_ids": ["F-001"],
-        "requirement_ids": ["R-006"],
+        "requirement_ids": [r2],
         "quotes": ["Порог хранится в долларах США"],
         "priority": "critical",
     }
     q_good = dict(q_bad, question="По какой дате считать месяц?", quotes=[F2])
-    llm = FakeLLM({"LLMFindings": [finding], "LLMQuestions": [json.dumps({"questions": [q_bad, q_good]})]})
+    llm = FakeLLM(
+        {
+            "LLMFindings": _before(sample, r2) + [finding],
+            "LLMQuestions": [json.dumps({"questions": [q_bad, q_good]})],
+        }
+    )
     report = orchestrator.run(sample, llm)
     assert [q.question for q in report.questions] == ["По какой дате считать месяц?"]
 

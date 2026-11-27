@@ -329,8 +329,10 @@ def status_codes(doc: DocumentIR) -> list[Finding]:
             if m.group(1) == "200" and "created" in b.text.lower():
                 out.append(
                     _f(
+                        # Заголовок раздела — не требование, находка всегда уровня набора: код 200
+                        # назван именем кода 201, документ расходится сам с собой и с HTTP.
                         "status_200_created",
-                        Criterion.correct,
+                        Criterion.set_consistent,
                         Severity.major,
                         "Код 200 назван «Created»",
                         f"Заголовок «{b.text}»"
@@ -388,17 +390,31 @@ def content_type_without_body(doc: DocumentIR) -> list[Finding]:
     return out
 
 
+# Заголовки колонок таблиц параметров: имя поля и его тип/формат (рус. и англ.)
+_PARAM_NAME_COL = re.compile(
+    r"^(?:parameter|param|field|attribute|name|параметр|поле|атрибут|имя|название)"
+    r"(?: (?:name|поля|параметра))?$"
+)
+_PARAM_TYPE_COL = re.compile(r"^(?:format|type|data type|формат|тип|тип данных)$")
+
+
+def _column(header: list[str], rx: re.Pattern[str]) -> int | None:
+    """Номер единственной колонки, чей заголовок подходит под rx; None — нет или неоднозначно."""
+    found = [i for i, h in enumerate(header) if rx.match(re.sub(r"\s+", " ", h.strip().lower()))]
+    return found[0] if len(found) == 1 else None
+
+
 def param_type_mismatch(doc: DocumentIR) -> list[Finding]:
     seen: dict[str, tuple[str, Block]] = {}
     out = []
     for b in doc.blocks:
         if b.kind != BlockKind.table_row or not b.header or not b.cells:
             continue
-        hdr = [h.lower() for h in b.header]
-        if "parameter" not in hdr or "format" not in hdr:
+        name_col, type_col = _column(b.header, _PARAM_NAME_COL), _column(b.header, _PARAM_TYPE_COL)
+        if name_col is None or type_col is None or name_col == type_col:
             continue
-        name = b.cells[hdr.index("parameter")].strip()
-        fmt = b.cells[hdr.index("format")].strip().lower() if len(b.cells) > hdr.index("format") else ""
+        name = b.cells[name_col].strip() if len(b.cells) > name_col else ""
+        fmt = b.cells[type_col].strip().lower() if len(b.cells) > type_col else ""
         if not name or not fmt:
             continue
         if name in seen and seen[name][0] != fmt:

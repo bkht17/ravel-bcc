@@ -419,9 +419,18 @@ def test_ocr_low_quality_is_fatal_exit_1(tmp_path):
 def test_cli_counts_are_split_by_kind(sample, tmp_path):
     out = tmp_path / "r.md"
     res = runner.invoke(app, ["check", str(sample), "-o", str(out), "-p", "none"])
-    assert "Требований: 49 (метаданных: 12, примеров: 6)," in res.output
+    from ravel.ingest import load_document
+    from ravel.segment import segment
+
+    reqs = segment(load_document(sample))
+    n = {k: sum(r.kind == k for r in reqs) for k in ("requirement", "metadata", "example")}
+    assert n["requirement"] and n["metadata"] and n["example"]
+    assert (
+        f"Требований: {n['requirement']} (метаданных: {n['metadata']}, примеров: {n['example']}),"
+        in res.output
+    )
     md = out.read_text(encoding="utf-8")
-    assert "| Требований выделено | 49 |" in md
-    assert "| Метаданных документа | 12 |" in md
-    assert "| Примеров | 6 |" in md
+    assert f"| Требований выделено | {n['requirement']} |" in md
+    assert f"| Метаданных документа | {n['metadata']} |" in md
+    assert f"| Примеров | {n['example']} |" in md
     assert "| E-001 | пример |" in md and "| M-001 | метаданные |" in md
