@@ -182,38 +182,83 @@ def vague_words(doc: DocumentIR) -> list[Finding]:
     return out
 
 
-def http_get_for_write(doc: DocumentIR) -> list[Finding]:
-    method_row = None
-    for b in doc.blocks:
+_HTTP_VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+_WRITE_WORDS = re.compile(r"\b(save|update|create|delete)\w*|сохран|измен|замен|удал", re.I)
+
+
+def _method_rows(blocks: list[Block]) -> list[int]:
+    """Индексы строк таблиц параметров, где указан HTTP-метод («REST type | GET»)."""
+    rows = []
+    for i, b in enumerate(blocks):
         if (
             b.kind == BlockKind.table_row
             and b.cells
+            and len(b.cells) > 1
             and re.search(r"rest\s*type|method|метод", b.cells[0], re.I)
+            and b.cells[1].strip().upper() in _HTTP_VERBS
         ):
-            if len(b.cells) > 1 and b.cells[1].strip().upper() == "GET":
-                method_row = b
-    if method_row is None:
-        return []
-    writes = [
-        b
-        for b in doc.blocks
-        if b.section[:-1] == method_row.section[:-1]
-        and re.search(r"\b(save|update|create|delete)\w*|сохран|измен|замен|удал", b.text, re.I)
-    ]
-    if not writes:
-        return []
-    return [
-        _f(
-            "http_get_write",
-            Criterion.correct,
-            Severity.critical,
-            "Изменение данных через GET",
-            "Метод меняет состояние (сохраняет настройку), но объявлен как GET. GET должен быть безопасным и "
-            "идемпотентным: прокси и браузеры кэшируют и повторяют его, параметры попадают в логи.",
-            [method_row.text, writes[0].text if len(writes[0].text) < 200 else writes[0].text[:200]],
-            "Использовать POST или PUT с телом запроса.",
+            rows.append(i)
+    return rows
+
+
+def _method_start(blocks: list[Block], row: int) -> int:
+    """Начало описания метода: первая строка его таблицы и заголовки/текст прямо над ней."""
+    start = row
+    while (
+        start > 0
+        and blocks[start - 1].kind == BlockKind.table_row
+        and blocks[start - 1].section == blocks[row].section
+    ):
+        start -= 1
+    target = blocks[row].section
+    while start > 0:
+        prev = blocks[start - 1]
+        is_own_heading = (
+            prev.kind == BlockKind.heading and (prev.section + [prev.text]) == target[: len(prev.section) + 1]
         )
-    ]
+        is_own_text = prev.kind != BlockKind.heading and prev.section == target
+        if not (is_own_heading or is_own_text):
+            break
+        start -= 1
+    return start
+
+
+def http_get_for_write(doc: DocumentIR) -> list[Finding]:
+    """GET, который меняет данные: метод и признак записи берутся из одного описания метода.
+
+    Описание метода — от его таблицы параметров до таблицы следующего метода (в том же разделе).
+    """
+    blocks = doc.blocks
+    rows = _method_rows(blocks)
+    starts = [_method_start(blocks, r) for r in rows]
+    out = []
+    for n, row in enumerate(rows):
+        method = blocks[row]
+        if method.cells[1].strip().upper() != "GET":
+            continue
+        parent = method.section[:-1]
+        end = starts[n + 1] if n + 1 < len(rows) else len(blocks)
+        scope = [
+            b
+            for b in blocks[starts[n] : end]
+            if b is not method and b.section[: len(parent)] == parent and b.kind != BlockKind.heading
+        ]
+        writes = [b for b in scope if _WRITE_WORDS.search(b.text)]
+        if not writes:
+            continue
+        out.append(
+            _f(
+                "http_get_write",
+                Criterion.correct,
+                Severity.critical,
+                "Изменение данных через GET",
+                "Метод меняет состояние (сохраняет настройку), но объявлен как GET. GET должен быть безопасным и "
+                "идемпотентным: прокси и браузеры кэшируют и повторяют его, параметры попадают в логи.",
+                [method.text, writes[0].text[:200]],
+                "Использовать POST или PUT с телом запроса.",
+            )
+        )
+    return out
 
 
 _STATUS_HEAD = re.compile(r"^(\d{3})\.\s")
@@ -324,23 +369,130 @@ def param_type_mismatch(doc: DocumentIR) -> list[Finding]:
     return out
 
 
+# Словарь измерений: (измерение, единица, регэксп полной формы | None, сокращения | None).
+# Сокращения («с», «ч», «Б») засчитываются только сразу после числа, иначе «с» — это предлог.
+_UNITS: list[tuple[str, str, str | None, str | None]] = [
+    ("деньги", "тенге", r"тенге", "₸"),
+    ("деньги", "тиын", r"тиын\w*", None),
+    ("деньги", "рубль", r"рубл\w*", r"руб\.?|₽"),
+    ("деньги", "копейка", r"копе(?:йк\w*|ек)", r"коп\.?"),
+    ("деньги", "доллар", r"доллар\w*|dollars?", r"\$"),
+    ("деньги", "цент", r"цент(?:а|ов|ы|ам|ах)?", None),
+    ("деньги", "евро", r"евро", r"€"),
+    ("время", "миллисекунда", r"миллисекунд\w*|milliseconds?", r"мс|ms"),
+    ("время", "секунда", r"секунд\w*|seconds?", r"сек\.?|с|s"),
+    ("время", "минута", r"минут\w*|minutes?", r"мин\.?"),
+    ("время", "час", r"час(?:а|ов|у|ы|ам|ах|е)?|hours?", r"ч"),
+    ("время", "сутки", r"сут(?:ки|ок|кам\w*|ках|ками)|days?", r"сут\.?"),
+    ("размер данных", "байт", r"байт\w*|bytes?", r"Б"),
+    ("размер данных", "КБ", r"килобайт\w*", r"КБ|Кб|KB|Kb"),
+    ("размер данных", "МБ", r"мегабайт\w*", r"МБ|Мб|MB|Mb"),
+    ("размер данных", "ГБ", r"гигабайт\w*", r"ГБ|Гб|GB|Gb"),
+]
+_NUM = r"\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?"
+_UNIT_RES: list[tuple[str, str, re.Pattern[str]]] = []  # слова — без учёта регистра, сокращения — с учётом
+for _dim, _name, _word, _abbr in _UNITS:
+    if _word:
+        _UNIT_RES.append((_dim, _name, re.compile(rf"(?<!\w)(?:{_word})(?!\w)", re.I)))
+    if _abbr:
+        _UNIT_RES.append((_dim, _name, re.compile(rf"(?<![\w.]){_NUM}\s?(?:{_abbr})(?!\w)(?!\s+[a-zа-яё])")))
+
+_COMPARE = re.compile(
+    r"больш|меньш|превыша|достига|не менее|не более|не выше|не ниже|выше|ниже|порог|лимит|сравни|сопостав"
+    r"|пересека|[≥≤<>]",
+    re.I,
+)
+_CONVERSION = re.compile(
+    r"×\s*\d|[*/]\s*\d|умнож|дел(?:ить|ит\w*|[её]н\w*|ени\w*)|пересчит|пересчёт|пересчет|конверт|курс"
+    r"|\d[\d\s.,]*[^\d\s=]+\s*=\s*\d|\d[\d\s.,]*[^\d\s]+\s+как\s+\d",
+    re.I,
+)
+_CLAUSE_END = re.compile(r"[.;,:!?\n]")
+_LEAD_CONJ = re.compile(r"^(?:и|а|но|или|если|когда)\s+", re.I)
+
+
+def _unit_mentions(text: str) -> list[tuple[int, int, str, str]]:
+    """(начало, конец, измерение, единица) без пересечений, по порядку в тексте."""
+    found = [(m.start(), m.end(), dim, name) for dim, name, rx in _UNIT_RES for m in rx.finditer(text)]
+    found.sort(key=lambda t: (t[0], -(t[1] - t[0])))
+    out: list[tuple[int, int, str, str]] = []
+    for f in found:
+        if out and f[0] < out[-1][1]:
+            continue
+        out.append(f)
+    return out
+
+
+def _mention_quote(text: str, mentions: list[tuple[int, int, str, str]], i: int) -> str:
+    """Фрагмент блока от границы фразы (или конца предыдущей единицы) до самой единицы."""
+    start_m, end_m = mentions[i][0], mentions[i][1]
+    start = 0
+    for m in _CLAUSE_END.finditer(text, 0, start_m):
+        start = m.end()
+    if i > 0:
+        start = max(start, mentions[i - 1][1])
+    seg = text[start:end_m].strip()
+    seg = _LEAD_CONJ.sub("", seg)
+    return seg
+
+
+def _unit_groups(blocks: list[Block]) -> list[list[Block]]:
+    """Связанные группы: блоки одного раздела; строки таблицы — отдельно от остального текста."""
+    groups: dict[tuple, list[Block]] = {}
+    run = 0
+    prev_table = False
+    for b in blocks:
+        if b.kind in (BlockKind.heading, BlockKind.code):
+            prev_table = False
+            continue
+        if b.kind == BlockKind.table_row:
+            if not prev_table:
+                run += 1
+            prev_table = True
+            key: tuple = ("t", tuple(b.section), run)
+        else:
+            prev_table = False
+            key = ("s", tuple(b.section))
+        groups.setdefault(key, []).append(b)
+    return list(groups.values())
+
+
 def mixed_units(doc: DocumentIR) -> list[Finding]:
+    """Величины одного измерения в разных единицах сравниваются без правила пересчёта."""
     out = []
-    for b in doc.blocks:
-        low = b.text.lower()
-        if "тиын" in low and ("тенге" in low or "₸" in low):
-            out.append(
-                _f(
-                    "mixed_units",
-                    Criterion.unambiguous,
-                    Severity.major,
-                    "Разные единицы сумм в одном требовании",
-                    "Суммы хранятся в тиынах, а порог — в тенге; не описано, как и где они сравниваются и округляются.",
-                    [b.text],
-                    "Хранить все суммы в одной единице или явно описать преобразование.",
-                    scope="requirement",
+    for group in _unit_groups(doc.blocks):
+        mentions = {b.id: _unit_mentions(b.text) for b in group}
+        group_text = "\n".join(b.text for b in group)
+        if _CONVERSION.search(group_text):
+            continue
+        # первое упоминание каждой единицы в группе: (блок, индекс упоминания)
+        first: dict[tuple[str, str], tuple[Block, int]] = {}
+        for b in group:
+            for i, (_, _, dim, name) in enumerate(mentions[b.id]):
+                first.setdefault((dim, name), (b, i))
+        keys = list(first)
+        for x in range(len(keys)):
+            for y in range(x + 1, len(keys)):
+                (dim1, u1), (dim2, u2) = keys[x], keys[y]
+                if dim1 != dim2:
+                    continue
+                (b1, i1), (b2, i2) = first[keys[x]], first[keys[y]]
+                if not _COMPARE.search(b1.text + "\n" + b2.text):
+                    continue
+                q1 = _mention_quote(b1.text, mentions[b1.id], i1)
+                q2 = _mention_quote(b2.text, mentions[b2.id], i2)
+                out.append(
+                    _f(
+                        "mixed_units",
+                        Criterion.unambiguous,
+                        Severity.major,
+                        f"Величины в разных единицах ({dim1}): {u1} и {u2}",
+                        f"Сравниваются «{q1}» ({u1}) и «{q2}» ({u2}); правило пересчёта не указано.",
+                        [q1, q2] if q1 != q2 else [q1],
+                        "Привести величины к одной единице или явно описать пересчёт и округление.",
+                        scope="requirement",
+                    )
                 )
-            )
     return out
 
 
