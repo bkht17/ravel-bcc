@@ -59,3 +59,75 @@ def make_docx(md_like: str) -> bytes:
     buf = io.BytesIO()
     d.save(buf)
     return buf.getvalue()
+
+
+# --------------------------------------------------------------------------- сбои LLM (tests/test_failures.py)
+
+FIXTURES = ROOT / "tests" / "fixtures"
+
+# сценарий → как ведёт себя подменённый generate_content: исключение или текст ответа
+LLM_FAILURE_SCENARIOS = (
+    "403",
+    "404",
+    "429",
+    "503",
+    "connect_error",
+    "read_timeout",
+    "invalid_json",
+    "empty",
+)
+
+
+def _gemini_response(text: str):
+    from unittest.mock import MagicMock
+
+    cand = MagicMock()
+    cand.finish_reason = "STOP"
+    resp = MagicMock()
+    resp.candidates = [cand]
+    resp.prompt_feedback = None
+    resp.text = text
+    return resp
+
+
+def _scenario_effect(name: str):
+    import httpx
+    from google.genai import errors
+
+    def api(code: int, status: str, message: str):
+        return errors.APIError(code, {"error": {"code": code, "status": status, "message": message}})
+
+    effects = {
+        "403": {"side_effect": api(403, "PERMISSION_DENIED", "API key not valid")},
+        "404": {"side_effect": api(404, "NOT_FOUND", "models/x is not found")},
+        "429": {"side_effect": api(429, "RESOURCE_EXHAUSTED", "Quota exceeded")},
+        "503": {"side_effect": api(503, "UNAVAILABLE", "The model is overloaded")},
+        "connect_error": {"side_effect": httpx.ConnectError("connection refused")},
+        "read_timeout": {"side_effect": httpx.ReadTimeout("read timed out")},
+        "invalid_json": {"return_value": _gemini_response("{")},
+        "empty": {"return_value": _gemini_response("")},
+    }
+    return effects[name]
+
+
+@pytest.fixture
+def no_retry_sleep(monkeypatch):
+    """Паузы между повторами LLMClient обнуляются; monkeypatch вернёт штатное значение после теста."""
+    from ravel.llm.base import LLMClient
+
+    monkeypatch.setattr(LLMClient, "retry_sleep", staticmethod(lambda seconds: None))
+
+
+@pytest.fixture
+def gemini_failing(request, monkeypatch, no_retry_sleep):
+    """(GeminiClient, MagicMock generate_content) для сценария из request.param (indirect-параметризация).
+
+    Ключ фиктивный, кэша нет, бюджет вызовов задан явно."""
+    from unittest.mock import MagicMock
+
+    from ravel.llm.gemini import GeminiClient
+
+    client = GeminiClient("gemini-test", "fake-key-123", None, max_calls=50)
+    mock = MagicMock(**_scenario_effect(request.param))
+    monkeypatch.setattr(client._client.models, "generate_content", mock)
+    return client, mock
