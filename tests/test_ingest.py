@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import pymupdf
 import pytest
@@ -131,3 +132,91 @@ def test_docx_with_damaged_xml_is_salvaged(tmp_path):
     doc = load_document(p)
     assert "docx_fallback" in codes(doc)
     assert any("Пользователь задаёт порог" in b.text for b in doc.blocks)
+
+
+# --- контроль покрытия, резервная нарезка, OCR ---------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+# число требований в табличном PDF до правок (прогон текущего кода перед изменением)
+TABLES_PDF_BASELINE = 51
+SAMPLE_REQS = 49
+
+
+def test_md_sample_requirement_count_unchanged(sample):
+    assert len(segment(load_document(sample))) == SAMPLE_REQS
+
+
+def test_printed_pdf_is_not_silently_lost(sample):
+    doc = load_document(FIXTURES / "requirements_printed.pdf")
+    assert not is_fatal(doc), doc.issues
+    n = len(segment(doc))
+    n_md = len(segment(load_document(sample)))
+    assert n > 0
+    assert n >= 0.7 * n_md
+    assert "low_coverage" not in codes(doc) or "fallback_segmentation" in codes(doc)
+
+
+def test_tables_pdf_not_worse():
+    doc = load_document(FIXTURES / "requirements_tables.pdf")
+    n = len(segment(doc))
+    assert abs(n - TABLES_PDF_BASELINE) <= 0.1 * TABLES_PDF_BASELINE
+    assert "low_coverage" not in codes(doc)
+
+
+def test_scan_is_ocr_low_quality_without_requirements():
+    from ravel.ingest.pdf import _ocr_languages, tessdata_dir
+
+    tessdata = tessdata_dir()
+    if tessdata is None:
+        pytest.skip("Tesseract не установлен")
+    if "rus" in _ocr_languages(tessdata).split("+"):
+        pytest.skip("есть tessdata rus: скан может прочитаться нормально")
+    doc = load_document(FIXTURES / "scan.pdf")
+    fatal = [i for i in doc.issues if i.code == "ocr_low_quality"]
+    assert fatal and fatal[0].level == IssueLevel.fatal
+    assert "rus" in fatal[0].message  # причина названа: нет языкового пакета
+    assert doc.blocks == [] and segment(doc) == []
+
+
+def test_headingless_text_with_six_numbered_items(tmp_path):
+    p = tmp_path / "plain.txt"
+    p.write_text(
+        "\n".join(
+            f"{i}. Система должна выполнять действие номер {i} за время не более {i} секунд."
+            for i in range(1, 7)
+        ),
+        encoding="utf-8",
+    )
+    doc = load_document(p)
+    assert len(segment(doc)) == 6
+    assert "low_coverage" not in codes(doc)
+
+
+def test_mostly_fragments_reports_low_coverage(tmp_path):
+    p = tmp_path / "frag.md"
+    p.write_text(
+        "\n\n".join(["Да."] * 80) + "\n\nСистема должна отправлять уведомление клиенту.\n", encoding="utf-8"
+    )
+    doc = load_document(p)
+    issue = next(i for i in doc.issues if i.code == "low_coverage")
+    assert issue.level == IssueLevel.warning
+    assert "%" in issue.message and "символов" in issue.message
+
+
+def test_fallback_blocks_keep_lines_and_pages():
+    from ravel.ingest.fallback import parse_fallback
+
+    md = "Ф-1. Первое требование документа.\nпродолжение первого.\n\n- второй пункт списка длинный\n3) третий пункт нумерации\n| a | b |\n"
+    blocks = parse_fallback(md, {1: 1, 2: 1, 3: 1, 4: 2, 5: 2, 6: 2})
+    assert [b.line for b in blocks] == [1, 4, 5, 6]
+    assert blocks[0].text == "Ф-1. Первое требование документа. продолжение первого."
+    assert blocks[0].location == "начало документа, стр. 1"
+    assert blocks[1].location.endswith("стр. 2")
+    assert blocks[3].kind.value == "table_row"
+
+
+def test_pdf_locations_have_page_numbers():
+    doc = load_document(FIXTURES / "requirements_printed.pdf")
+    reqs = segment(doc)
+    assert reqs and all("стр. " in r.location for r in reqs)
+    assert {r.location.rsplit("стр. ", 1)[1] for r in reqs} >= {"1", "4"}

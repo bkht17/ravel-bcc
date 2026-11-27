@@ -346,3 +346,57 @@ def test_set_checker_failure_is_undecided_exit_2(tmp_path, monkeypatch):
     assert any(m.startswith("set_checker") for m in report["llm_failures"]), report["llm_failures"]
     assert report["verdict"]["status"] == "undecided"
     assert res.exit_code == 2, res.output
+
+
+# --- частичное чтение: новые коды проблем чтения и итог ---------------------------------------
+
+
+def test_low_coverage_with_successful_llm_is_undecided_exit_2(tmp_path, monkeypatch):
+    from .conftest import MINI_MD
+    from .test_agents import FakeLLM
+
+    src = tmp_path / "mini.md"
+    # три проверенных требования и много обрывков, не попадающих в требования: покрытие ниже порога
+    src.write_text(MINI_MD + "\n" + "\n\n".join(["Да."] * 400) + "\n", encoding="utf-8")
+    _use_llm(monkeypatch, FakeLLM({"LLMFacts": [_ok_facts()]}))
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(src), "-o", str(out), "-p", "gemini"])
+    report = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert any(i["code"] == "low_coverage" for i in report["issues"])
+    assert report["verdict"]["status"] == "undecided"
+    assert "low_coverage" in report["verdict"]["headline"] or "low_coverage" in out.read_text(
+        encoding="utf-8"
+    )
+    assert res.exit_code == 2
+    assert READY_PHRASE not in out.read_text(encoding="utf-8")
+
+
+def test_fallback_segmentation_alone_is_not_partial_read():
+    from pathlib import Path
+
+    from ravel.models import IngestIssue, IssueLevel
+    from ravel.orchestrator import run, undecided_reasons
+
+    # печатный PDF проходит через резервный путь; покрытие нормальное, значит чтение полное
+    report = run(Path(__file__).parent / "fixtures" / "requirements_printed.pdf", None)
+    assert not any("прочитан частично" in r for r in undecided_reasons(report))
+    assert not any(i.level == IssueLevel.warning for i in report.issues)
+    # и наоборот: warning с кодом low_coverage или fallback_segmentation чтение частичным считает
+    for code in ("low_coverage", "fallback_segmentation"):
+        report.issues = [IngestIssue(level=IssueLevel.warning, code=code, message="x")]
+        assert any("прочитан частично" in r for r in undecided_reasons(report))
+
+
+def test_ocr_low_quality_is_fatal_exit_1(tmp_path):
+    from ravel.ingest.pdf import _ocr_languages, tessdata_dir
+
+    tessdata = tessdata_dir()
+    if tessdata is None or "rus" in _ocr_languages(tessdata).split("+"):
+        pytest.skip("нужен Tesseract без tessdata rus")
+    from pathlib import Path
+
+    scan = Path(__file__).parent / "fixtures" / "scan.pdf"
+    out = tmp_path / "r.md"
+    res = runner.invoke(app, ["check", str(scan), "-o", str(out), "--provider", "none"])
+    assert res.exit_code == 1
+    assert "ocr_low_quality" in out.read_text(encoding="utf-8")
