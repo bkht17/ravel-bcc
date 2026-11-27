@@ -59,3 +59,165 @@ def test_atomic_write_keeps_old_file_on_failure(tmp_path, monkeypatch):
         atomic_write(target, "new")
     assert target.read_text(encoding="utf-8") == "old"
     assert [p.name for p in Path(tmp_path).iterdir()] == ["report.md"]
+
+
+# --- защита выходов и групповая запись ---------------------------------------------------------
+
+
+def _sha(p: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _run(src, out):
+    return runner.invoke(app, ["check", str(src), "-o", str(out), "-p", "none"])
+
+
+def test_output_equals_input_rejected(sample, tmp_path):
+    src = tmp_path / "x.md"
+    src.write_bytes(sample.read_bytes())
+    before = _sha(src)
+    res = _run(src, src)
+    assert res.exit_code == 1
+    assert "Выходной файл совпадает с входным" in res.output
+    assert _sha(src) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.md"]
+
+
+def test_output_symlink_to_input_rejected(sample, tmp_path):
+    src = tmp_path / "x.md"
+    src.write_bytes(sample.read_bytes())
+    before = _sha(src)
+    link = tmp_path / "link.md"
+    link.symlink_to(src)
+    res = _run(src, link)
+    assert res.exit_code == 1
+    assert _sha(src) == before and link.is_symlink()
+
+
+def test_json_output_colliding_with_input_rejected(sample, tmp_path):
+    src = tmp_path / "x.json"
+    src.write_text('{"keep": 1}', encoding="utf-8")
+    res = _run(src, tmp_path / "x.md")
+    assert res.exit_code == 1
+    assert src.read_text(encoding="utf-8") == '{"keep": 1}'
+    assert not (tmp_path / "x.md").exists()
+
+
+def test_output_is_directory_rejected(sample, tmp_path):
+    d = tmp_path / "out.md"
+    d.mkdir()
+    assert _run(sample, d).exit_code == 1
+
+
+def _snapshot(tmp_path, names):
+    return {n: (tmp_path / n).read_bytes() for n in names}
+
+
+NAMES = ["r.md", "r.json", "r.questions.yaml", "r.trace.jsonl"]
+
+
+def test_failure_mid_group_keeps_old_files_and_no_tmpdir(sample, tmp_path, monkeypatch):
+    from ravel import fsutil
+
+    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    before = _snapshot(tmp_path, NAMES)
+
+    real, calls = fsutil._stage, []
+
+    def flaky(path, content):
+        calls.append(path)
+        if len(calls) == 3:
+            raise OSError("disk full")
+        real(path, content)
+
+    monkeypatch.setattr(fsutil, "_stage", flaky)
+    res = _run(sample, tmp_path / "r.md")
+    assert res.exit_code != 0 and len(calls) == 3
+    assert _snapshot(tmp_path, NAMES) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(NAMES)
+
+
+def _run_ids(tmp_path):
+    import json
+
+    import yaml  # noqa: F401
+
+    ids = {
+        "json": json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["run_id"],
+        "trace": json.loads((tmp_path / "r.trace.jsonl").read_text(encoding="utf-8").splitlines()[0])["run_id"],
+    }
+    ids["yaml"] = (tmp_path / "r.questions.yaml").read_text(encoding="utf-8").splitlines()[0].split(": ")[1]
+    row = next(
+        ln for ln in (tmp_path / "r.md").read_text(encoding="utf-8").splitlines() if ln.startswith("| ID прогона")
+    )
+    ids["md"] = row.split("`")[1]
+    return ids
+
+
+def test_run_id_same_in_all_files_and_new_per_run(sample, tmp_path):
+    from ravel.render import load_answers
+
+    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    first = _run_ids(tmp_path)
+    assert len(set(first.values())) == 1
+    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    second = _run_ids(tmp_path)
+    assert len(set(second.values())) == 1
+    assert second["md"] != first["md"]
+    assert load_answers(tmp_path / "r.questions.yaml") == []
+
+
+def test_paths_with_spaces_and_cyrillic(sample, tmp_path):
+    d = tmp_path / "папка с пробелом"
+    d.mkdir()
+    src = d / "требования 1.md"
+    src.write_bytes(sample.read_bytes())
+    out = d / "отчёт 1.md"
+    assert _run(src, out).exit_code == 0
+    assert out.exists() and (d / "отчёт 1.trace.jsonl").exists()
+    assert [p.name for p in d.iterdir() if p.name.startswith(".")] == []
+
+
+def test_missing_passport_row_writes_nothing(sample, tmp_path, monkeypatch):
+    from ravel import render
+
+    assert _run(sample, tmp_path / "r.md").exit_code == 0
+    before = _snapshot(tmp_path, NAMES)
+
+    monkeypatch.setattr(render, "render_markdown", lambda report: "# Отчёт\n\n| Поле | Значение |\n")
+    res = _run(sample, tmp_path / "r.md")
+    assert res.exit_code == 1
+    assert "Версия промптов" in res.output and "не записан" in res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit)
+    assert _snapshot(tmp_path, NAMES) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(NAMES)
+
+
+def test_write_outputs_missing_passport_row_raises_before_mkdir(tmp_path, monkeypatch):
+    from ravel import render
+    from ravel.models import Report
+
+    monkeypatch.setattr(render, "render_markdown", lambda report: "без паспорта\n")
+    out = tmp_path / "new" / "r.md"
+    with pytest.raises(render.ReportRenderError, match="Версия промптов"):
+        render.write_outputs(Report.model_construct(questions=[], trace=[]), out, "rid")
+    assert not out.parent.exists()
+
+
+def test_output_hardlink_to_input_rejected(sample, tmp_path):
+    src = tmp_path / "x.md"
+    src.write_bytes(sample.read_bytes())
+    before = _sha(src)
+    link = tmp_path / "link.md"
+    try:
+        os.link(src, link)
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"ФС не поддерживает жёсткие ссылки: {e}")
+    res = _run(src, link)
+    assert res.exit_code == 1
+    assert "Выходной файл совпадает с входным" in res.output
+    assert _sha(src) == before and _sha(link) == before
+    assert os.path.samefile(src, link)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["link.md", "x.md"]

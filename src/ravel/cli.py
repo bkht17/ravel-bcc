@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import uuid
 from pathlib import Path
 from typing import Annotated
 
@@ -11,6 +13,28 @@ from dotenv import load_dotenv
 from ravel import __version__
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Агент статической проверки требований.")
+
+
+def _check_output_paths(src: Path, outs: dict[str, Path]) -> str | None:
+    """Вернуть текст ошибки, если выходы опасны (совпадают с входом, каталог, дубли), иначе None."""
+    src_res = src.resolve()
+    seen: dict[Path, Path] = {}
+    for out in outs.values():
+        res = out.resolve()
+        if out.is_dir():
+            return f"Выходной путь — каталог: {out}"
+        same = res == src_res
+        if not same and out.exists() and src.exists():
+            try:
+                same = os.path.samefile(out, src)
+            except OSError:
+                same = False
+        if same:
+            return f"Выходной файл совпадает с входным: {out}"
+        if res in seen:
+            return f"Выходные файлы совпадают между собой: {seen[res]} и {out}"
+        seen[res] = out
+    return None
 
 
 @app.callback()
@@ -40,7 +64,14 @@ def check(
     """Проверить документ требований и записать отчёт."""
     from ravel import orchestrator
     from ravel.llm import LLMUnavailable, get_client
-    from ravel.render import load_answers, write_outputs
+    from ravel.render import ReportRenderError, load_answers, output_paths, write_outputs
+
+    # Проверка путей — до get_client, чтения документа и любых обращений к LLM.
+    bad = _check_output_paths(input, output_paths(output))
+    if bad:
+        typer.secho(bad, fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    run_id = str(uuid.uuid4())
 
     try:
         llm = get_client(provider, model)
@@ -78,7 +109,11 @@ def check(
             typer.secho(f"\nПерепроверяю с учётом {len(given)} ответов…", err=True)
             report = orchestrator.run(input, llm, prior + given, on_step=step)
 
-    paths = write_outputs(report, output)
+    try:
+        paths = write_outputs(report, output, run_id)
+    except ReportRenderError as e:
+        typer.secho(f"Отчёт не записан: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from e
     code = orchestrator.exit_code(report)
     color = {0: typer.colors.GREEN, 2: typer.colors.YELLOW}.get(code, typer.colors.RED)
     typer.secho(

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+import uuid
 from collections import Counter
 from importlib.resources import files
 from pathlib import Path
@@ -12,7 +14,7 @@ from pathlib import Path
 import yaml
 from jinja2 import Environment, StrictUndefined
 
-from ravel.fsutil import atomic_write
+from ravel.fsutil import atomic_write_group
 from ravel.models import CRITERION_LABELS, SEVERITY_LABELS, Question, Report, Severity
 
 
@@ -55,24 +57,62 @@ def render_markdown(report: Report) -> str:
     )
 
 
-def write_outputs(report: Report, out_md: Path) -> dict[str, Path]:
+def output_paths(out_md: Path) -> dict[str, Path]:
     stem = out_md.with_suffix("")
-    paths = {
+    return {
         "report": out_md,
         "json": stem.with_suffix(".json"),
         "questions": Path(f"{stem}.questions.yaml"),
         "trace": Path(f"{stem}.trace.jsonl"),
     }
-    atomic_write(paths["json"], report.model_dump_json(indent=2))
-    atomic_write(paths["questions"], questions_yaml(report.questions))
-    atomic_write(paths["trace"], "".join(s.model_dump_json() + "\n" for s in report.trace))
-    atomic_write(paths["report"], render_markdown(report))  # последним: md = «прогон завершён»
+
+
+_PASSPORT_ANCHOR = "| Версия промптов |"
+
+
+class ReportRenderError(RuntimeError):
+    """Отчёт не удалось собрать; на диск ничего не записано."""
+
+
+def _with_run_id_row(md: str, run_id: str) -> str:
+    """Вставить строку «ID прогона» в паспорт (после «Версия промптов»), не трогая шаблон.
+
+    Если строки паспорта нет — ReportRenderError: иначе run_id молча пропал бы из MD,
+    оставшись в JSON/YAML/trace.
+    """
+    lines = md.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith(_PASSPORT_ANCHOR):
+            if not line.endswith("\n"):
+                lines[i] = line + "\n"
+            lines.insert(i + 1, f"| ID прогона | `{run_id}` |\n")
+            return "".join(lines)
+    raise ReportRenderError(
+        "в паспорте отчёта нет строки «Версия промптов» — некуда вставить «ID прогона»; файлы не записаны"
+    )
+
+
+def write_outputs(report: Report, out_md: Path, run_id: str | None = None) -> dict[str, Path]:
+    run_id = run_id or str(uuid.uuid4())
+    paths = output_paths(out_md)
+    # Все четыре содержимых собираем до записи: любая ошибка здесь не трогает целевую папку.
+    md = _with_run_id_row(render_markdown(report), run_id)
+    data = {"run_id": run_id, **json.loads(report.model_dump_json())}
+    trace = json.dumps({"run_id": run_id}) + "\n" + "".join(s.model_dump_json() + "\n" for s in report.trace)
+    contents = {
+        paths["json"]: json.dumps(data, ensure_ascii=False, indent=2),
+        paths["questions"]: questions_yaml(report.questions, run_id),
+        paths["trace"]: trace,
+        paths["report"]: md,  # последним: md = «прогон завершён»
+    }
+    atomic_write_group(contents)
     return paths
 
 
-def questions_yaml(questions: list[Question]) -> str:
+def questions_yaml(questions: list[Question], run_id: str | None = None) -> str:
     header = (
-        "# Уточняющие вопросы к автору требований.\n"
+        (f"# run_id: {run_id}\n" if run_id else "")
+        + "# Уточняющие вопросы к автору требований.\n"
         "# Впишите ответы в поле answer и запустите проверку снова с --answers <этот файл>.\n"
     )
     data = [
