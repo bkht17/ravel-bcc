@@ -267,6 +267,27 @@ uv run ruff check src tests
 uv run python eval/score.py reports/report.json   # полнота против эталона дефектов
 ```
 
+### Оценочный эталон `eval/`
+
+`eval/` — измерительный инструмент разработчиков, а не часть агента. Там лежат эталоны дефектов
+(`golden.yaml` для `samples/requirements.md`, контрольные документы `foreign/`) и скрипты оценки.
+Агент эталон не читает и в модель не передаёт:
+
+- каталог не входит в пакет: wheel собирается только из `src/ravel` (`pyproject.toml`);
+- в `src/ravel` нет ни одного обращения к `eval/`, `golden` или `judgments`;
+- проверено прогоном с перехватом: при запрещённом открытии любых файлов из `eval/` агент
+  проходит весь путь (49 из 49 требований), а в сообщениях к модели нет текстов эталона.
+
+Независимая оценка отчёта, полученного обычной командой `ravel check`:
+
+```bash
+uv run ravel check samples/requirements.md -o reports/report.md
+uv run python eval/score.py reports/report.json --judge eval/judgments.yaml
+```
+
+`score.py` читает только готовый `report.json` и эталон. Полнота — доля найденных пунктов эталона
+с весами, точность — по ручной разметке `judgments.yaml`. Методика описана в `eval/README.md`.
+
 Структура:
 
 ```text
